@@ -23,7 +23,8 @@ from llumnix.arg_utils import InstanceArgs
 from llumnix.backends.backend_interface import BackendType
 from llumnix.llumlet.llumlet import Llumlet
 from llumnix.queue.queue_type import QueueType
-from llumnix.utils import initialize_placement_group, get_placement_group_name
+from llumnix.ray_utils import initialize_placement_group, get_placement_group_name
+from llumnix.utils import try_convert_to_local_path
 
 # pylint: disable=unused-import
 from tests.conftest import ray_env
@@ -54,7 +55,8 @@ class MockLlumlet(Llumlet):
 
 @pytest.mark.skipif(torch.cuda.device_count() < 1, reason="Need at least 1 GPU to run the test.")
 def test_engine_step_exception(ray_env):
-    engine_args = EngineArgs(model="facebook/opt-125m", download_dir="/mnt/model", max_model_len=8, worker_use_ray=True, enforce_eager=True)
+    engine_args = EngineArgs(model=try_convert_to_local_path("facebook/opt-125m"), download_dir="/mnt/model",
+                             max_model_len=8, worker_use_ray=True, enforce_eager=True)
 
     # wait previous test to release the GPU memory
     time.sleep(5.0)
@@ -74,8 +76,8 @@ def test_engine_step_exception(ray_env):
     )
     ray.get(llumlet.is_ready.remote())
 
-    all_actors = ray.util.list_named_actors(True)
-    all_actor_names = [actor["name"] for actor in all_actors]
+    actor_infos = ray.util.list_named_actors(True)
+    all_actor_names = [actor_info["name"] for actor_info in actor_infos]
     assert actor_name in all_actor_names
 
     cur_free_memory_list = []
@@ -87,8 +89,8 @@ def test_engine_step_exception(ray_env):
     ray.get(llumlet.set_error_step.remote(True))
     time.sleep(3)
 
-    all_actors = ray.util.list_named_actors(True)
-    all_actor_names = [actor["name"] for actor in all_actors]
+    actor_infos = ray.util.list_named_actors(True)
+    all_actor_names = [actor["name"] for actor in actor_infos]
     assert actor_name not in all_actor_names
 
     cur_free_memory_list = []

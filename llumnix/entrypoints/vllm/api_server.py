@@ -16,8 +16,10 @@ from contextlib import asynccontextmanager
 import time
 import asyncio
 import json
+
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
+import ray
 import uvicorn
 
 from vllm.sampling_params import SamplingParams
@@ -49,6 +51,12 @@ async def lifespan(fastapi_app: FastAPI):
     yield
     # 关闭后操作
     llumnix_client.request_output_queue.cleanup()
+    for instance in llumnix_client.instances.values():
+        try:
+            ray.kill(instance)
+        # pylint: disable=bare-except
+        except:
+            pass
 
 app = FastAPI(lifespan=lifespan)
 
@@ -179,19 +187,18 @@ if __name__ == "__main__":
     parser.add_argument("--ssl-keyfile", type=str)
     parser.add_argument("--ssl-certfile", type=str)
     parser.add_argument("--log-level", type=str, choices=["debug", "info", "warning", "error"])
+    parser = add_cli_args(parser)
+    cli_args = parser.parse_args()
+    llumnix_config = get_llumnix_config(cli_args.config_file, cli_args)
 
-    cli_args = add_cli_args(parser)
-    # 加载配置文件并将命令行参数覆盖到配置中，返回最终的配置对象
-    cfg = get_llumnix_config(cli_args.config_file, cli_args)
-
-    entrypoints_args, manager_args, instance_args, engine_args = get_args(cfg, LaunchMode.LOCAL, parser, cli_args)
+    entrypoints_args, manager_args, instance_args, engine_args = get_args(llumnix_config, LaunchMode.LOCAL, parser, cli_args)
     backend_type = BackendType.VLLM if not instance_args.simulator_mode else BackendType.SIM_VLLM
     launch_args = LaunchArgs(launch_mode=LaunchMode.LOCAL, backend_type=backend_type)
 
     # Launch or connect to the ray cluster for multi-node serving.
     setup_ray_cluster(entrypoints_args)
 
-    # if gpu is not available, it means that this node is head pod without any llumnix components
+    # if gpu is not available, it means that this node is head pod without any llumnix components.
     if is_gpu_available():
         entrypoints_context = setup_llumnix(entrypoints_args, manager_args, instance_args, engine_args, launch_args)
         llumnix_client = LlumnixClientVLLM(entrypoints_context)

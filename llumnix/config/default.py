@@ -71,10 +71,16 @@ _C.MANAGER.LOG_FILENAME = "server.log"
 _C.MANAGER.ENABLE_PORT_INCREMENT = False
 # Enable store port offset when deploying multiple servers
 _C.MANAGER.ENABLE_PORT_OFFSET_STORE = False
-# Enable prefill decoding disaggregation
+# Enable prefill-decode disaggregation
 _C.MANAGER.ENABLE_PD_DISAGG = False
-# The p:d ratio used in gloabl launch model
+# The p:d ratio used in gloabl launch mode
 _C.MANAGER.PD_RATIO = "1:1"
+# Load engine arguments from storage
+_C.MANAGER.LOAD_REGISTERED_SERVICE = False
+# Path of loading engine arguments
+_C.MANAGER.LOAD_REGISTERED_SERVICE_PATH = None
+# Enable prefill-decode disaggregation node affinity scheduling.
+_C.MANAGER.ENABLE_PDD_NODE_AFFINITY_SCHEDULING = False
 
 # -------------------------- DISPATCH CONFIGURATION ---------------------------
 # Request dispatch policy
@@ -120,6 +126,8 @@ _C.INSTANCE.INSTANCE_TYPE = "no_constraints"
 _C.INSTANCE.SIMULATOR_MODE = False
 # Profiling result file path when using simulator
 _C.INSTANCE.PROFILING_RESULT_FILE_PATH = None
+# environment variable used as bladellm engine instance id
+_C.INSTANCE.ENGINE_DISAGG_INST_ID_ENV_VAR = None
 
 # ------------------------- LOAD METRICS CONFIGURATION ------------------------
 # Instance dispatch load metric
@@ -145,8 +153,8 @@ _C.INSTANCE.MIGRATION_NUM_LAYERS = 1
 # Timeout(s) for initializing migration backend
 _C.INSTANCE.MIGRATION_BACKEND_INIT_TIMEOUT = 10.0
 # Transfer type for migration backend kvTransfer
-_C.INSTANCE.MIGRATION_BACKEND_TRANSFER_TYPE = "rdma"
+_C.INSTANCE.KVTRANSFER_MIGRATION_BACKEND_TRANSFER_TYPE = "rdma"
 # Address of grpc server for migration backend
-_C.INSTANCE.GRPC_MIGRATION_BACKEND_SERVER_ADDRESS = "127.0.0.1:50051"
+_C.INSTANCE.GRPC_MIGRATION_BACKEND_SERVER_PORT = 50051
 # URL of naming server for kvtransfer migration backend
 _C.INSTANCE.KVTRANSFER_MIGRATION_BACKEND_NAMING_URL = "file:/tmp/llumnix/naming/"

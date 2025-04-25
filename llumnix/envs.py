@@ -21,9 +21,13 @@ if TYPE_CHECKING:
     LLUMNIX_LOGGING_PREFIX: str = "Llumnix"
     LLUMNIX_LOG_STREAM: int = 1
     LLUMNIX_LOG_NODE_PATH: str = ""
+    MODEL_PATH: str = ""
+    DATASET_PATH: str = ""
 
 
 environment_variables: Dict[str, Callable[[], Any]] = {
+    # ================== Llumnix environment variables ==================
+
     # Logging configuration
     # If set to 0, llumnix will not configure logging
     # If set to 1, llumnix will configure logging using the default configuration
@@ -35,7 +39,7 @@ environment_variables: Dict[str, Callable[[], Any]] = {
 
     # this is used for configuring the default logging level
     "LLUMNIX_LOGGING_LEVEL":
-    lambda: os.getenv("LLUMNIX_LOGGING_LEVEL", "INFO"),
+    lambda: os.getenv("LLUMNIX_LOGGING_LEVEL", "DEBUG"),
 
     # if set, LLUMNIX_LOGGING_PREFIX will be prepended to all log messages
     "LLUMNIX_LOGGING_PREFIX":
@@ -47,6 +51,11 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # if set, llumnix will routing all node logs to this path
     "LLUMNIX_LOG_NODE_PATH":
     lambda: os.getenv("LLUMNIX_LOG_NODE_PATH", ""),
+
+    "MODEL_PATH":
+    lambda: os.getenv("MODEL_PATH", ""),
+    "DATASET_PATH":
+    lambda: os.getenv("DATASET_PATH", ""),
 }
 
 

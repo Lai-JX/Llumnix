@@ -49,16 +49,19 @@ usage: -m llumnix.entrypoints.vllm.api_server [-h]
             [--migration-buffer-blocks MIGRATION_BUFFER_BLOCKS]
             [--migration-num-layers MIGRATION_NUM_LAYERS]
             [--migration-backend-init-timeout MIGRATION_BACKEND_INIT_TIMEOUT]
-            [--migration-backend-transfer-type {cuda_ipc,rdma,}]
-            [--grpc-migration-backend-server-address GRPC_MIGRATION_BACKEND_SERVER_ADDRESS]
+            [--kvtransfer-migration-backend-transfer-type {ipc,rdma}]
+            [--grpc-migration-backend-server-port GRPC_MIGRATION_BACKEND_SERVER_PORT]
             [--kvtransfer-migration-backend-naming-url KVTRANSFER_MIGRATION_BACKEND_NAMING_URL]
             [--migration-max-stages MIGRATION_MAX_STAGES]
             [--migration-last-stage-max-blocks MIGRATION_LAST_STAGE_MAX_BLOCKS]
             [--enable-pd-disagg]
             [--pd-ratio PD_RATIO]
+            [--load-registered-service]
+            [--load-registered-service-path]
             [--enable-port-increment]
             [--enable-port-offset-store]
             [--instance-type INSTANCE_TYPE]
+            [--engine-disagg-inst-id-env-var]
 
 ```
 
@@ -230,14 +233,14 @@ usage: -m llumnix.entrypoints.vllm.api_server [-h]
 - Timeout(s) for initializing migration backend.
 - Default: 10.0
 
-`--migration-backend-transfer-type`
-- Transfer type for migration backend grpc and kvTransfer.
-- Possible choices: cuda_ipc, rdma
+`--kvtransfer-migration-backend-transfer-type`
+- Transfer type for migration backend kvTransfer.
+- Possible choices: ipc, rdma
 - Default: "rdma"
 
-`--grpc-migration-backend-server-address`
-- Address of grpc server for migration backend
-- Default: "127.0.0.1:50051"
+`--grpc-migration-backend-server-port`
+- Port of grpc server for migration backend
+- Default: 50051
 
 `--kvtransfer-migration-backend-naming-url`
 - URL of naming server for kvtransfer migration backend
@@ -252,11 +255,19 @@ usage: -m llumnix.entrypoints.vllm.api_server [-h]
 - Default: 16
 
 `--enable-pd-disagg`
-- Enable prefill decoding disaggregation.
+- Enable prefill decode disaggregation.
 
 `--pd-ratio`
-- The p:d ratio used in gloabl launch model.
+- The p:d ratio used in gloabl launch mode.
 - Default: "1:1"
+
+`--load-registered-service`
+- Load registered service.
+- Default: False
+
+`--load-registered-service-path`
+- Path of loading registered service.
+- Default: None
 
 `--enable-port-increment`
 - Enable port increment when desploying multiple servers.
@@ -267,6 +278,9 @@ usage: -m llumnix.entrypoints.vllm.api_server [-h]
 `--instance-type`
 - Instance types for the engine.
 - Possible choices: prefill, decode, no_constraints
+
+`--engine-disagg-inst-id-env-var`
+- specify which environment variable to use as the engine instance id.
 
 # Unsupported vLLM feature options
 

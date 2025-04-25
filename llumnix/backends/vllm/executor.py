@@ -12,33 +12,32 @@
 # limitations under the License.
 
 import time
-
 from collections import defaultdict
 from typing import Callable, Dict, List, Optional, Tuple, Type
+
 import ray
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 # pylint: disable=unused-import
 from ray.util.placement_group import PlacementGroup
 
-from vllm.executor.executor_base import ExecutorBase
-from vllm.executor.ray_gpu_executor import RayGPUExecutor, RayGPUExecutorAsync, RayWorkerWrapper, envs, \
+from vllm.executor.ray_gpu_executor import RayGPUExecutorAsync, RayWorkerWrapper, envs, \
                                            get_ip, get_vllm_instance_id, get_distributed_init_method, get_open_port
 from vllm.worker.worker_base import WorkerBase
 
-from vllm.sequence import Logprob, SequenceOutput, ExecuteModelRequest
-from vllm.utils import GiB_bytes
+from vllm.sequence import ExecuteModelRequest
+from vllm.model_executor.layers.sampler import SamplerOutput
 
 from llumnix.internal_config import MigrationConfig
 from llumnix.logging.logger import init_logger
-from llumnix.backends.vllm.utils import get_cache_block_size
-from llumnix.backends.profiling import LatencyMemData, SimCacheConfig, model_prefill, model_decode, _pad_to_alignment
+from llumnix.utils import random_uuid
 
 logger = init_logger(__name__)
 
 
 class LlumnixRayGPUExecutor(RayGPUExecutorAsync):
+    instance_id: str = None
     migration_config: MigrationConfig = None
-    last_inference_latency:int = 0
+    last_inference_latency: int = 0
 
     def _init_workers_ray(self, placement_group: PlacementGroup,
                           **ray_remote_kwargs):
@@ -71,6 +70,8 @@ class LlumnixRayGPUExecutor(RayGPUExecutorAsync):
         driver_ip = get_ip()
         worker_wrapper_kwargs = self._get_worker_wrapper_args()
         for bundle_id, bundle in enumerate(placement_group.bundle_specs):
+            if bundle.get("PREFILL_GPU") or bundle.get("DECODE_GPU"):
+                continue
             if not bundle.get("GPU", 0):
                 raise Exception("GPU resource cannot be 0.")
             # The Llumlet and worker shares the same 1 gpu in the first bundle of PlacementGroup.
@@ -87,6 +88,7 @@ class LlumnixRayGPUExecutor(RayGPUExecutorAsync):
                 num_gpus=num_gpus,
                 scheduling_strategy=scheduling_strategy,
                 max_concurrency=2,
+                name=f"RayWorkerWrapper_{self.instance_id}_"+random_uuid(),
                 **ray_remote_kwargs,
             )(RayWorkerWrapper).remote(**worker_wrapper_kwargs)
 
@@ -169,6 +171,7 @@ class LlumnixRayGPUExecutor(RayGPUExecutorAsync):
                 " network configuration. If you set `VLLM_HOST_IP` or "
                 "`HOST_IP` environment variable, make sure it is unique for"
                 " each node.")
+
         # pylint: disable=invalid-name
         VLLM_INSTANCE_ID = get_vllm_instance_id()
 
@@ -259,9 +262,51 @@ class LlumnixRayGPUExecutor(RayGPUExecutorAsync):
         worker_class_name = "MigrationWorker"
         return (worker_module_name, worker_class_name, worker_class_fn)
 
-    async def execute_model_async(self, *args, **kwargs):
+    async def execute_model_async(self, execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
         t0 = time.time()
-        outputs = await super().execute_model_async(*args, **kwargs)
+        if not self.use_ray_spmd_worker:
+            return await super().execute_model_async(execute_model_req)
+
+        # pylint: disable=access-member-before-definition
+        if self.forward_dag is None:
+            self.forward_dag = self._compiled_ray_dag(enable_asyncio=True)
+
+        serialized_data = self.input_encoder.encode(execute_model_req)
+        dag_future = await self.forward_dag.execute_async(serialized_data)
+        outputs = await dag_future[0]
+        request_outputs = self.output_decoder.decode(outputs)
+
         t1 = time.time()
         self.last_inference_latency = (t1 - t0) * 1000
-        return outputs
+        return request_outputs
+
+    # _check_ray_adag_installation in vllm-v0.6.3.post1 requires ray version == 2.35.
+    # _check_ray_adag_installation here (follows vllm-v0.7.2) requires ray version >= 2.40.
+    # Llumnix requires ray version == 3.0.0.dev0, so we override the `_check_ray_adag_installation` method.
+    def _check_ray_adag_installation(self):
+        # pylint: disable=import-outside-toplevel
+        import pkg_resources
+        # pylint: disable=import-outside-toplevel
+        from packaging import version
+
+        required_version = version.parse("2.40")
+        current_version = version.parse(
+            pkg_resources.get_distribution("ray").version)
+        if current_version < required_version:
+            raise ValueError(f"Ray version {required_version} is "
+                             f"required, but found {current_version}")
+
+        # pylint: disable=import-outside-toplevel
+        import importlib.util
+        adag_spec = importlib.util.find_spec(
+            "ray.experimental.compiled_dag_ref")
+        if adag_spec is None:
+            raise ValueError("Ray accelerated DAG is not installed. "
+                             "Run `pip install ray[adag]` to install it.")
+
+        cupy_spec = importlib.util.find_spec("cupy")
+        if cupy_spec is None and envs.VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL:
+            raise ValueError(
+                "cupy is not installed but required since "
+                "VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL is set."
+                "Run `pip install ray[adag]` and check cupy installation.")

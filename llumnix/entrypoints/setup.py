@@ -12,23 +12,24 @@
 # limitations under the License.
 
 import subprocess
-import traceback
 import sys
 import os
 import time
 from typing import Dict, Optional, List, Tuple
+
 import ray
 
 from llumnix.manager import Manager
 from llumnix.llumlet.llumlet import Llumlet
 from llumnix.logging.logger import init_logger
-from llumnix.utils import random_uuid, get_manager_name
+from llumnix.utils import random_uuid, get_llumnix_env_vars
+from llumnix.ray_utils import get_manager_name
 from llumnix.arg_utils import ManagerArgs, EntrypointsArgs, LaunchArgs, InstanceArgs
 from llumnix.queue.queue_type import QueueType
 from llumnix.server_info import ServerInfo
 from llumnix.queue.utils import init_request_output_queue_server
-from llumnix.entrypoints.utils import (LaunchMode, EntrypointsContext, get_ip_address,
-                                       retry_manager_method_sync)
+from llumnix.entrypoints.utils import LaunchMode, EntrypointsContext, retry_manager_method_sync
+from llumnix.utils import get_ip_address
 from llumnix.backends.backend_interface import BackendType
 from llumnix.queue.queue_server_base import QueueServerBase
 from llumnix.constants import MAX_RAY_RESTART_TIMES, RAY_RESTART_INTERVAL
@@ -79,10 +80,13 @@ def connect_to_ray_cluster(head_node_ip: str = None,
                            port: int = None,
                            namespace: str ="llumnix",
                            log_to_driver: bool=True) -> None:
+    # env_vars of runtime_env can only set once in ray.init or ray actor initialization, otherwise will get ray error.
     if head_node_ip is not None and port is not None:
-        ray.init(address=f"{head_node_ip}:{port}", ignore_reinit_error=True, namespace=namespace, log_to_driver=log_to_driver)
+        ray.init(address=f"{head_node_ip}:{port}", ignore_reinit_error=True, namespace=namespace, log_to_driver=log_to_driver,
+                 runtime_env={"env_vars": get_llumnix_env_vars()})
     else:
-        ray.init(ignore_reinit_error=True, namespace=namespace, log_to_driver=log_to_driver)
+        ray.init(ignore_reinit_error=True, namespace=namespace, log_to_driver=log_to_driver,
+                 runtime_env={"env_vars": get_llumnix_env_vars()})
 
 def setup_ray_cluster(entrypoints_args) -> None:
     if entrypoints_args.launch_ray_cluster:
@@ -123,9 +127,10 @@ def init_llumnix_components(entrypoints_args: EntrypointsArgs,
 
     backend_type: BackendType = launch_args.backend_type
     request_output_queue_type: QueueType = QueueType(entrypoints_args.request_output_queue_type)
+    node_id = ray.get_runtime_context().get_node_id()
     instance_ids, instances = retry_manager_method_sync(
         manager.init_instances.remote, 'init_instances', request_output_queue_type,
-        backend_type, instance_args, engine_args)
+        backend_type, instance_args, engine_args, node_id)
 
     available_instance_ids = []
     available_instances = []
@@ -137,13 +142,24 @@ def init_llumnix_components(entrypoints_args: EntrypointsArgs,
         # pylint: disable=broad-except
         except Exception as e:
             logger.error("Instance {} is dead.".format(instance_id))
-            logger.error("Unexpected exception occurs: {}".format(e))
-            logger.error("Exception traceback: {}".format(traceback.format_exc()))
+            logger.exception("Unexpected exception: {}".format(e))
             retry_manager_method_sync(manager.scale_down.remote, 'scale_down', instance_id)
 
+    if len(available_instance_ids) > 0:
+        logger.info("Init Llumnix components done, {} instances are ready, instance_ids: {}."
+                    .format(len(available_instance_ids), available_instance_ids))
+
     ip = get_ip_address()
-    request_output_queue_port: str = entrypoints_args.request_output_queue_port
-    request_output_queue = init_request_output_queue_server(ip, request_output_queue_port, request_output_queue_type)
+    request_output_queue_port = entrypoints_args.request_output_queue_port
+    if request_output_queue_type == QueueType.RAYQUEUE:
+        # Init rayqueue in manager to ensure the job id of all actors are the same as manager.
+        # We found that when the job id of rayqueue is inherited from driver process, it may raise job id unequal error sometimes.
+        request_output_queue = retry_manager_method_sync(
+            manager.init_request_output_queue_server.remote, 'init_request_output_queue_server', ip, request_output_queue_port,
+            request_output_queue_type)
+    else:
+        # zmq context cannot be serialized, so init zmq queue server in driver.
+        request_output_queue = init_request_output_queue_server(ip, request_output_queue_port, request_output_queue_type)
 
     return manager, available_instance_ids, available_instances, request_output_queue
 

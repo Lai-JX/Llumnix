@@ -13,8 +13,7 @@
 
 from statistics import mean
 import time
-import traceback
-from typing import Any, List, Optional, Union, Iterable, Deque, Tuple
+from typing import List, Optional, Union, Iterable, Deque, Tuple, Dict
 from collections import defaultdict
 import threading
 import asyncio
@@ -31,6 +30,7 @@ from vllm.engine.arg_utils import EngineArgs
 from vllm.utils import Counter
 from vllm.usage.usage_lib import UsageContext
 from vllm.engine.llm_engine import SchedulerContext
+from vllm import envs as vllm_envs
 
 from llumnix.logging.logger import init_logger
 from llumnix.instance_info import InstanceInfo
@@ -42,7 +42,9 @@ from llumnix.server_info import ServerInfo
 from llumnix.internal_config import MigrationConfig
 from llumnix.queue.utils import QueueType
 from llumnix.backends.utils import AsyncPutQueueActor
-from llumnix.utils import get_instance_name, make_async
+from llumnix.utils import make_async
+from llumnix.ray_utils import get_instance_name
+from llumnix.llumlet.request import LlumnixRequest
 from llumnix import constants
 from llumnix.metrics.timestamps import set_timestamp
 from llumnix.llumlet.dcgm import GPUMonitor
@@ -87,9 +89,10 @@ class LLMEngineLlumnix(_AsyncLLMEngine):
         self.put_queue_loop_thread = threading.Thread(
             target=self._start_put_queue_loop, args=(), daemon=True, name="put_queue_loop"
         )
-        self.async_put_queue_actor = ray.remote(
+        self.async_put_queue_actor: AsyncPutQueueActor = ray.remote(
             num_cpus=1,
-            scheduling_strategy=scheduling_strategy
+            scheduling_strategy=scheduling_strategy,
+            name="AsyncPutQueueActor_"+instance_id
         )(AsyncPutQueueActor).remote(instance_id, request_output_queue_type)
         self.put_queue_loop_thread.start()
 
@@ -124,6 +127,7 @@ class LLMEngineLlumnix(_AsyncLLMEngine):
             from llumnix.backends.vllm.executor import LlumnixRayGPUExecutor
             executor_class = LlumnixRayGPUExecutor
             executor_class.migration_config = migration_config
+            executor_class.instance_id = instance_id
         else:
             raise ValueError('Unsupported executor backend')
         # Create the LLM engine.
@@ -290,7 +294,8 @@ class LLMEngineLlumnix(_AsyncLLMEngine):
             self._update_gpu_mertics(instance_info)
         self.instance_info = instance_info
 
-    def add_request(self, request_id: str, server_info: ServerInfo, expected_steps: int, *args, **kwargs):
+    # pylint: disable=invalid-overridden-method
+    async def add_request(self, request_id: str, server_info: ServerInfo, expected_steps: int, *args, **kwargs):
         super().add_request(request_id, *args, **kwargs)
         seq_group = self.scheduler[0].waiting[-1]
         set_timestamp(server_info, 'engine_add_request_timestamp', time.time())
@@ -316,7 +321,8 @@ class LLMEngineLlumnix(_AsyncLLMEngine):
             if server_id not in server_info_dict:
                 server_info_dict[server_id] = server_info
         # TODO(s5u13b): Reduce the across-actor overhead.
-        self.async_put_queue_actor.put_nowait_to_servers.remote(server_request_outputs, server_info_dict)
+        if server_info_dict:
+            self.async_put_queue_actor.put_nowait_to_servers.remote(server_request_outputs, server_info_dict)
 
 
 class BackendVLLM(BackendInterface):
@@ -346,6 +352,7 @@ class BackendVLLM(BackendInterface):
         for vid in range(engine_args.pipeline_parallel_size):
             self.engine.scheduler[vid].add_update_instance_info_callback(self.engine.update_instance_info)
         self.engine.output_processor.scheduler = self.engine.scheduler
+        self.migration_config = migration_config
         self.instance_id = instance_id
         self.worker_handle_list = self.engine.model_executor.workers.copy()
         if len(self.worker_handle_list) + 1 == self.engine.parallel_config.world_size:
@@ -365,6 +372,8 @@ class BackendVLLM(BackendInterface):
         if not self.disable_async_output_proc:
             self._output_proc_done_event_queue = queue.Queue()
             self.engine._output_proc_done_event_queue = self._output_proc_done_event_queue
+
+        self.use_ray_spmd_worker = vllm_envs.VLLM_USE_RAY_SPMD_WORKER
 
         self._stop_event = asyncio.Event()
         asyncio.create_task(self._start_engine_step_loop())
@@ -388,8 +397,7 @@ class BackendVLLM(BackendInterface):
                     await asyncio.sleep(NO_OUTPUTS_STEP_INTERVAL)
             # pylint: disable=broad-except
             except Exception as e:
-                logger.error("Error in engine loop: {}".format(e))
-                logger.error("Exception traceback: {}".format(traceback.format_exc()))
+                logger.exception("Error in engine loop: {}".format(e))
                 self._run_workers("shutdown")
 
                 previous_state = self.state
@@ -404,16 +412,14 @@ class BackendVLLM(BackendInterface):
     async def execute_worker_method_async(self, method, *args, **kwargs):
         return await make_async(self.engine.model_executor.driver_worker.execute_method)(method, *args, **kwargs)
 
-    def add_request(self,
-                    request_id: str,
-                    server_info: ServerInfo,
-                    expected_steps: int,
-                    *args,
-                    **kwargs) -> None:
-        # Store the server information of each request to put the request outputs back to the corresponding api server correctly.
-        self.engine.add_request(request_id, server_info, expected_steps, *args, **kwargs)
+    # Store the server information of each request to put the request outputs back to the corresponding api server correctly.
+    async def add_request(self, request_id: str, server_info: ServerInfo, expected_steps: int, *args, **kwargs) -> None:
+        await self.engine.add_request(request_id, server_info, expected_steps, *args, **kwargs)
 
-    def commit_dst_request(self, backend_request: SequenceGroupLlumnix) -> None:
+    async def commit_dst_request(self, backend_request: SequenceGroupLlumnix) -> None:
+        if self.use_ray_spmd_worker and backend_request.status == RequestStatus.RUNNING_MIGRATING:
+            await self._run_workers_async("commit_seq_group_metadata", backend_request.request_id)
+
         seq = backend_request.get_seqs()[0]
         seq.seq_id = next(self.engine.seq_counter)
         logger.info("pop request {} from pre_alloc_cache_dict".format(backend_request.request_id))
@@ -423,18 +429,25 @@ class BackendVLLM(BackendInterface):
         assert RequestStatus.is_migrating(backend_request.status), \
             "The status of request migrated to dst instance should be  \
              RequestStatus.WAITING_MIGRATING or RequestStatus.RUNNING_MIGRATING"
-        if backend_request.status == RequestStatus.WAITING_MIGRATING:
-            self.add_waiting_request(backend_request)
-        else: # RUNNING_MIGRATING:
+        if backend_request.status == RequestStatus.RUNNING_MIGRATING:
             backend_request.reset_status()
             self.add_running_request(backend_request)
+        else: # WAITING_MIGRATING:
+            self.add_waiting_request(backend_request)
 
-    async def send_blocks(self, dst_ray_actor: "ray.actor.ActorHandle", src_blocks: List[int], dst_blocks: List[int]) -> None:
+    async def send_blocks(self,
+                          dst_ray_actor: "ray.actor.ActorHandle",
+                          src_blocks: List[int],
+                          dst_blocks: List[int],
+                          request_id: str,
+                          is_last_stage: bool) -> None:
         await dst_ray_actor.execute_engine_method_async.remote("_run_workers_async",
                                                                "migrate_cache",
+                                                               src_worker_handle_list=self.worker_handle_list,
                                                                dst_blocks=dst_blocks,
                                                                src_blocks=src_blocks,
-                                                               src_worker_handle_list=self.worker_handle_list)
+                                                               request_id=request_id,
+                                                               is_last_stage=is_last_stage)
 
     def _run_workers(self, *args, **kwargs):
         # pylint: disable=protected-access
@@ -444,7 +457,7 @@ class BackendVLLM(BackendInterface):
         # pylint: disable=protected-access
         return await make_async(self.engine.model_executor._run_workers)(*args, **kwargs)
 
-    def is_ready(self):
+    async def is_ready(self):
         return True
 
     def abort_request(self, request_id: Union[str, Iterable[str]]) -> None:
@@ -459,10 +472,12 @@ class BackendVLLM(BackendInterface):
     def get_waiting_queue(self) -> Deque[SequenceGroupLlumnix]:
         return self.engine.scheduler[0].get_waiting_queue()
 
-    def get_request_incremental_blocks(self, *args, **kwargs) -> Tuple[List[int], List[int]]:
-        return self.engine.scheduler[0].get_request_incremental_blocks(*args, **kwargs)
+    async def get_request_incremental_blocks(self, backend_request: LlumnixRequest, pre_stage_num_blocks: int) -> Tuple[List[int], List[int]]:
+        incremental_blocks, incremental_token_ids = \
+            self.engine.scheduler[0].get_request_incremental_blocks(backend_request, pre_stage_num_blocks)
+        is_last_stage = (len(incremental_blocks) <= self.migration_config.migration_last_stage_max_blocks) or backend_request.blocking_migration
+        return incremental_blocks, incremental_token_ids, is_last_stage
 
-    # pylint: disable=invalid-overridden-method
     # 迁移时需要调用到
     async def remove_running_request(self, request_id: str) -> bool:
         step_done_event = asyncio.Event()
@@ -484,11 +499,22 @@ class BackendVLLM(BackendInterface):
     def add_migrating_out_request_last_stage(self, *args, **kwargs) -> None:
         return self.engine.scheduler[0].add_migrating_out_request_last_stage(*args, **kwargs)
 
-    def remove_migrating_out_request_last_stage(self, *args, **kwargs) -> None:
-        return self.engine.scheduler[0].remove_migrating_out_request_last_stage(*args, **kwargs)
+    def pop_migrating_out_request_last_stage(self, backend_request: LlumnixRequest) -> None:
+        # Only running requests have sequence group metadata in workers.
+        if self.use_ray_spmd_worker and backend_request.status == RequestStatus.RUNNING_MIGRATING:
+            # pylint: disable=protected-access
+            asyncio.create_task(
+                self._run_workers_async(
+                    "pop_migrating_out_seq_group_metadata", backend_request.request_id))
+        return self.engine.scheduler[0].pop_migrating_out_request_last_stage(backend_request.request_id)
 
-    def pop_migrating_out_requests_last_stage(self, *args, **kwargs) -> List[Any]:
-        return self.engine.scheduler[0].pop_migrating_out_requests_last_stage(*args, **kwargs)
+    def free_migrating_out_requests_last_stage(self, *args, **kwargs) -> List[LlumnixRequest]:
+        migrating_out_requests_last_stage = self.engine.scheduler[0].free_migrating_out_requests_last_stage(*args, **kwargs)
+        if self.use_ray_spmd_worker and migrating_out_requests_last_stage and \
+            migrating_out_requests_last_stage[0].status == RequestStatus.RUNNING_MIGRATING:
+            # pylint: disable=protected-access
+            asyncio.create_task(self._run_workers_async("restore_migrating_out_seq_group_metadata"))
+        return migrating_out_requests_last_stage
 
     def pre_alloc(self, *args, **kwargs) -> List[int]:
         return self.engine.scheduler[0].pre_alloc(*args, **kwargs)
@@ -505,8 +531,13 @@ class BackendVLLM(BackendInterface):
     def is_request_running(self, *args, **kwargs) -> bool:
         return self.engine.scheduler[0].is_request_running(*args, **kwargs)
 
-    def free_dst_pre_alloc_cache(self, *args, **kwargs) -> None:
-        return self.engine.scheduler[0].free_dst_pre_alloc_cache(*args, **kwargs)
+    def free_dst_pre_alloc_cache(self, request_id: str = None) -> None:
+        # request is None when free_dst_pre_alloc_cache is called by clear_migration_states.
+        # TODO(s5u13b): Only needed when running waiting request.
+        if request_id is None and self.use_ray_spmd_worker:
+            # pylint: disable=protected-access
+            asyncio.create_task(self._run_workers_async("free_migrating_in_seq_group_metadata"))
+        return self.engine.scheduler[0].free_dst_pre_alloc_cache(request_id)
 
     def free_src_request(self, backend_request: SequenceGroup) -> None:
         return self.engine.scheduler[0].free_src_request(backend_request)

@@ -18,7 +18,7 @@ import ray
 from ray.util.queue import Queue as RayQueue
 
 from llumnix.queue.utils import init_request_output_queue_client, QueueType
-from llumnix.utils import get_manager_name
+from llumnix.ray_utils import get_manager_name
 
 from tests.unit_test.entrypoints.vllm.api_server import (MockManager, setup_entrypoints_context,
                                                          run_uvicorn_server)
@@ -37,7 +37,7 @@ class MockManagerServer(MockManager):
 
     def init_server(self, entrypoints_args):
         server = APIServerActor.options(name=ENTRYPOINTS_ACTOR_NAME,
-                                       namespace='llumnix').remote(entrypoints_args)
+                                        namespace='llumnix').remote(entrypoints_args)
         return server
 
     # pylint: disable=arguments-renamed

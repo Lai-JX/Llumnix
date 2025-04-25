@@ -1,14 +1,16 @@
 from typing import List
 import os
+import time
 import asyncio
 
 import ray
 
-from llumnix import launch_ray_cluster, connect_to_ray_cluster, init_manager
-from llumnix import (ManagerArgs, InstanceArgs, EngineArgs, Manager,
-                     Llumlet, ServerInfo, QueueType, BackendType,
-                     SamplingParams)
-from llumnix.utils import random_uuid
+from vllm.engine.arg_utils import EngineArgs
+from vllm.sampling_params import SamplingParams
+
+from llumnix import (Manager, launch_ray_cluster, connect_to_ray_cluster, init_manager,
+                     ManagerArgs, InstanceArgs, Llumlet, ServerInfo, QueueType, BackendType)
+from llumnix.utils import random_uuid, try_convert_to_local_path
 from llumnix.queue.ray_queue_server import RayQueueServer
 
 from tests.conftest import cleanup_ray_env_func
@@ -36,18 +38,23 @@ connect_to_ray_cluster(port=ray_cluster_port)
 # Set manager args and engine args.
 manager_args = ManagerArgs()
 instance_args = InstanceArgs()
-engine_args = EngineArgs(model="facebook/opt-125m", download_dir="/mnt/model", worker_use_ray=True,
+engine_args = EngineArgs(model=try_convert_to_local_path("facebook/opt-125m"), download_dir="/mnt/model", worker_use_ray=True,
                          trust_remote_code=True, max_model_len=370, enforce_eager=True)
+node_id = ray.get_runtime_context().get_node_id()
 
 # Create a manager. If the manager is created first, and then the instances are created.
 manager: Manager = init_manager(manager_args)
 ray.get(manager.is_ready.remote())
 
-# Create instances.
+# Create instances and register to manager.
 instance_ids: List[str] = None
 instances: List[Llumlet] = None
 instance_ids, instances = ray.get(manager.init_instances.remote(
-    QueueType("rayqueue"), BackendType.VLLM, instance_args, engine_args))
+    QueueType("rayqueue"), BackendType.VLLM, instance_args, engine_args, node_id))
+num_instance = 0
+while num_instance == 0:
+    num_instance = ray.get(manager.scale_up.remote([], [], [], []))
+    time.sleep(1.0)
 
 # The requests‘ outputs will be put to the request_output_queue no matter which instance it's running in.
 server_id = random_uuid()
@@ -84,14 +91,14 @@ async def main():
 asyncio.run(main())
 
 # Kill all actor, as detach actor will not be killed by ray.shutdown.
-named_actors = ray.util.list_named_actors(True)
-for actor in named_actors:
+named_actor_infos = ray.util.list_named_actors(True)
+for actor_info in named_actor_infos:
     try:
-        actor_handle = ray.get_actor(actor['name'], namespace=actor['namespace'])
+        actor_handle = ray.get_actor(actor_info['name'], namespace=actor_info['namespace'])
         ray.kill(actor_handle)
     except:
         continue
-    
+
 cleanup_ray_env_func()
 
 # Shutdown ray cluster.

@@ -20,7 +20,6 @@ from llumnix.global_scheduler.migration_scheduler import MigrationScheduler
 from llumnix.instance_info import InstanceType
 from llumnix.global_scheduler.migration_filter import MigrationInstanceFilter, MigrationFilterConfig
 from llumnix.global_scheduler.migration_policy import PairMigrationConstraints
-from llumnix.arg_utils import InstanceArgs
 
 MIGRATE_OUT_LOAD_THRESHOLD = -3.0
 INSTANCE_NUM = 16
@@ -29,18 +28,7 @@ def init_migration_scheduler(policy='balanced'):
     migration_scheduler = MigrationScheduler(policy, MIGRATE_OUT_LOAD_THRESHOLD, False)
     return migration_scheduler
 
-def test_add_instance_and_remove_instance():
-    migration_scheduler = init_migration_scheduler('balanced')
-    migration_scheduler.add_instance('instance_1', InstanceArgs(instance_type="no_constraints"))
-    assert migration_scheduler.num_instances == 1
-    migration_scheduler.add_instance('instance_2', InstanceArgs(instance_type="no_constraints"))
-    assert migration_scheduler.num_instances == 2
-    migration_scheduler.remove_instance('instance_1')
-    assert migration_scheduler.num_instances == 1
-    migration_scheduler.remove_instance('instance_2')
-    assert migration_scheduler.num_instances == 0
-
-@pytest.mark.parametrize("pair_migration_type", ['NO_CONSTRAINTS', 'DECODING_2_DECODING', 'PREFILL_2_DECODING'])
+@pytest.mark.parametrize("pair_migration_type", ['NO_CONSTRAINTS', 'DECODE_2_DECODE', 'PREFILL_2_DECODE'])
 def test_migration_filter(pair_migration_type):
     num_tests = 1000
     migration_filter = MigrationInstanceFilter(MigrationFilterConfig(MIGRATE_OUT_LOAD_THRESHOLD))
@@ -75,22 +63,22 @@ def test_migration_filter(pair_migration_type):
         src_instance_infos, dst_instance_infos = migration_filter.filter_instances(instance_infos, pair_migration_type)
 
         for instance in src_instance_infos:
-            if pair_migration_type != PairMigrationConstraints.PREFILL_2_DECODING:
+            if pair_migration_type != PairMigrationConstraints.PREFILL_2_DECODE:
                 assert instance.num_killed_requests > 0 \
                     or instance.migration_load_metric > MIGRATE_OUT_LOAD_THRESHOLD
                 if pair_migration_type == PairMigrationConstraints.NO_CONSTRAINTS:
                     assert instance.instance_type == InstanceType.NO_CONSTRAINTS
-                elif pair_migration_type == PairMigrationConstraints.DECODING_2_DECODING:
+                elif pair_migration_type == PairMigrationConstraints.DECODE_2_DECODE:
                     assert instance.instance_type == InstanceType.DECODE
             else:
                 assert instance.instance_type == InstanceType.PREFILL
 
         for instance in dst_instance_infos:
-            if pair_migration_type != PairMigrationConstraints.PREFILL_2_DECODING:
+            if pair_migration_type != PairMigrationConstraints.PREFILL_2_DECODE:
                 assert instance.num_killed_requests == 0 and instance.migration_load_metric < MIGRATE_OUT_LOAD_THRESHOLD
                 if pair_migration_type == PairMigrationConstraints.NO_CONSTRAINTS:
                     assert instance.instance_type == InstanceType.NO_CONSTRAINTS
-                elif pair_migration_type == PairMigrationConstraints.DECODING_2_DECODING:
+                elif pair_migration_type == PairMigrationConstraints.DECODE_2_DECODE:
                     assert instance.instance_type == InstanceType.DECODE
             else:
                 assert instance.instance_type == InstanceType.DECODE
@@ -115,7 +103,7 @@ def test_pair_migration(policy):
             instance_info_dict[instance_id] = instance_info
         migration_scheduler.instance_info = instance_info_dict
 
-        migrate_instance_pairs = migration_scheduler.pair_migration(PairMigrationConstraints.NO_CONSTRAINTS)
+        migrate_instance_pairs = migration_scheduler.pair_migration(instance_info_dict, PairMigrationConstraints.NO_CONSTRAINTS)
         exist_migration = exist_migration or len(migrate_instance_pairs) > 0
 
         for migrate_out_instance, migrate_in_instance in migrate_instance_pairs:

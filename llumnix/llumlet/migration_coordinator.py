@@ -12,16 +12,12 @@
 # limitations under the License.
 
 import time
-import traceback
 import enum
 from typing import List
 
-# pylint: disable=unused-import
-import ray
-
 from llumnix.logging.logger import init_logger
 from llumnix.llumlet.request import LlumnixRequest, RequestStatus
-from llumnix.backends.backend_interface import BackendInterface
+from llumnix.backends.backend_interface import BackendInterface, BackendType
 
 logger = init_logger(__name__)
 
@@ -44,11 +40,13 @@ class MigrationStatus(enum.Enum):
 class MigrationCoordinator:
     def __init__(self,
                  backend_engine: BackendInterface,
+                 backend_type: BackendType,
                  migration_last_stage_max_blocks: int,
                  migration_max_stages: int) -> None:
+        self.backend_engine = backend_engine
+        self.backend_type = backend_type
         self.migration_last_stage_max_blocks = migration_last_stage_max_blocks
         self.migration_max_stages = migration_max_stages
-        self.backend_engine = backend_engine
 
     async def migrate_out_running_request(self,
                                           migrate_in_ray_actor: "ray.actor.ActorHandle",
@@ -56,8 +54,7 @@ class MigrationCoordinator:
         try:
             return await self._migrate_out_multistage(migrate_in_ray_actor, migrate_out_request)
         except Exception as e:
-            logger.error("Unexpected exception: {}".format(e))
-            logger.error("Exception traceback: {}".format(traceback.format_exc()))
+            logger.exception("Unexpected exception: {}".format(e))
             raise
 
     async def migrate_out_waiting_request(self,
@@ -78,13 +75,12 @@ class MigrationCoordinator:
                                                                     migrate_out_request.token_ids)
             if len(dst_blocks) != migrate_out_request.prefill_num_blocks:
                 self.backend_engine.add_waiting_request(migrate_out_request)
-                self.backend_engine.remove_migrating_out_request_last_stage(migrate_out_request)
+                self.backend_engine.pop_migrating_out_request_last_stage(migrate_out_request)
                 return MigrationStatus.ABORTED_DST
 
             return MigrationStatus.FINISHED
         except Exception as e:
-            logger.error("Unexpected exception: {}".format(e))
-            logger.error("Exception traceback: {}".format(traceback.format_exc()))
+            logger.exception("Unexpected exception: {}".format(e))
             raise
 
     async def _migrate_out_multistage(self,
@@ -105,8 +101,7 @@ class MigrationCoordinator:
             # exceed max stages
             return MigrationStatus.ABORTED_SRC
         except Exception as e:
-            logger.error("Unexpected exception: {}".format(e))
-            logger.error("Exception traceback: {}".format(traceback.format_exc()))
+            logger.exception("Unexpected exception: {}".format(e))
             raise
 
     async def _migrate_out_onestage(self,
@@ -119,13 +114,19 @@ class MigrationCoordinator:
                 return MigrationStatus.ABORTED_SRC
 
             pre_stage_num_blocks = sum(migrate_out_request.stage_num_blocks_list)
-            incremental_blocks, incremental_token_ids = self.backend_engine.get_request_incremental_blocks(migrate_out_request, pre_stage_num_blocks)
+            # TODO(s5u13b): Make migration codes of vLLM and BladeLLM uniform (some functions are not async).
+            incremental_blocks, incremental_token_ids, is_last_stage = \
+                await self.backend_engine.get_request_incremental_blocks(migrate_out_request, pre_stage_num_blocks)
+
+            if migrate_out_request.should_abort_migration():
+                return MigrationStatus.ABORTED_SRC
+
             # live migration, transfer all blocks except last one(currently updating)
-            is_last_stage = (len(incremental_blocks) <= self.migration_last_stage_max_blocks) or migrate_out_request.blocking_migration
             if not is_last_stage:
                 migration_status = MigrationStatus.RUNNING
                 src_blocks = incremental_blocks[:-1]
-                incremental_token_ids = incremental_token_ids[:len(src_blocks)*migrate_out_request.block_size]
+                if len(incremental_token_ids) > 0:
+                    incremental_token_ids = incremental_token_ids[:len(src_blocks)*migrate_out_request.block_size]
                 stage_block_num = len(incremental_blocks) - 1
                 dst_blocks = await migrate_in_ray_actor.execute_migration_method \
                                         .remote("migrate_in_pre_alloc", migrate_out_request.request_id,
@@ -154,7 +155,7 @@ class MigrationCoordinator:
                 # migrate-in instance failed to pre alloc
                 if is_last_stage:
                     self.backend_engine.add_running_request(migrate_out_request)
-                    self.backend_engine.remove_migrating_out_request_last_stage(migrate_out_request)
+                    self.backend_engine.pop_migrating_out_request_last_stage(migrate_out_request)
                 return MigrationStatus.ABORTED_DST
 
             if migrate_out_request.should_abort_migration():
@@ -164,7 +165,7 @@ class MigrationCoordinator:
             migrate_out_request.stage_timestamps.append(time.time())
             migrate_out_request.stage_num_blocks_list.append(stage_block_num)
             # TODO(ZeldaHuang): send_blocks in migrate_in_pre_alloc/migrate_in_last_stage
-            await self.backend_engine.send_blocks(migrate_in_ray_actor, src_blocks, dst_blocks)
+            await self.backend_engine.send_blocks(migrate_in_ray_actor, src_blocks, dst_blocks, migrate_out_request.request_id, is_last_stage)
 
             if not is_last_stage and migrate_out_request.should_abort_migration():
                 # migrate-out request abort by scheduler during send/recv
@@ -172,8 +173,7 @@ class MigrationCoordinator:
 
             return migration_status
         except Exception as e:
-            logger.error("Unexpected exception: {}".format(e))
-            logger.error("Exception traceback: {}".format(traceback.format_exc()))
+            logger.exception("Unexpected exception: {}".format(e))
             raise
 
     def migrate_in_pre_alloc(self,

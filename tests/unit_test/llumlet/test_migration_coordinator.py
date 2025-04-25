@@ -18,7 +18,7 @@ import ray
 import pytest
 
 from llumnix.llumlet.migration_coordinator import MigrationCoordinator
-from llumnix.backends.backend_interface import BackendInterface
+from llumnix.backends.backend_interface import BackendInterface, BackendType
 from llumnix.llumlet.llumlet import MigrationStatus
 
 # pylint: disable=unused-import
@@ -37,12 +37,12 @@ async def test_migrate_out_onestage(ray_env):
     migrate_in_ray_actor = MagicMock()
     migrate_out_request = MagicMock()
     # Create an instance of MigrationCoordinator
-    coordinator = MigrationCoordinator(backend_engine, migration_last_stage_max_blocks=1, migration_max_stages=3)
+    coordinator = MigrationCoordinator(backend_engine, BackendType.VLLM, migration_last_stage_max_blocks=1, migration_max_stages=3)
 
     # Mock method return values and test data
     src_blocks = [1, 2, 3]
     dst_blocks = [1, 2]
-    backend_engine.get_request_incremental_blocks.return_value = src_blocks, []
+    backend_engine.get_request_incremental_blocks.return_value = src_blocks, [], False
     migrate_out_request.n_blocks = 3
     migrate_out_request.should_abort_migration.return_value = False
     migrate_out_request.blocking_migration = False
@@ -58,7 +58,7 @@ async def test_migrate_out_onestage(ray_env):
     migrate_out_request.finished = False
     src_blocks = [3]
     dst_blocks = [3]
-    backend_engine.get_request_incremental_blocks.return_value = src_blocks, []
+    backend_engine.get_request_incremental_blocks.return_value = src_blocks, [], True
     migrate_out_request.should_abort_migration.return_value = False
     migrate_out_request.blocking_migration = False
     migrate_in_ray_actor.execute_migration_method.remote.return_value = ray_remote_call.remote(dst_blocks)
@@ -69,7 +69,7 @@ async def test_migrate_out_onestage(ray_env):
     # Test migration dst aborted scenario
     src_blocks = [1, 2, 3]
     dst_blocks = []
-    backend_engine.get_request_incremental_blocks.return_value = src_blocks, []
+    backend_engine.get_request_incremental_blocks.return_value = src_blocks, [], False
     migrate_out_request.n_blocks = 3
     migrate_out_request.should_abort_migration.return_value = False
     migrate_out_request.blocking_migration = False
@@ -81,7 +81,7 @@ async def test_migrate_out_onestage(ray_env):
     migrate_out_request = MagicMock()
     src_blocks = [1, 2, 3]
     dst_blocks = [1, 2]
-    backend_engine.get_request_incremental_blocks.return_value = src_blocks, []
+    backend_engine.get_request_incremental_blocks.return_value = src_blocks, [], False
     migrate_out_request.n_blocks = 3
     migrate_out_request.should_abort_migration.return_value = True
     migrate_out_request.blocking_migration = False
@@ -100,7 +100,7 @@ async def test_migrate_out_running_request(_, ray_env):
 
     # Create an instance of MigrationCoordinator
     migration_max_stages = 3
-    coordinator = MigrationCoordinator(backend_engine, 1, migration_max_stages)
+    coordinator = MigrationCoordinator(backend_engine, BackendType.VLLM, 1, migration_max_stages)
     migrate_in_ray_actor = MagicMock()
     migrate_in_ray_actor.execute_engine_method = MagicMock()
     migrate_in_ray_actor.execute_engine_method.remote = MagicMock()
@@ -128,7 +128,7 @@ async def test_migrate_out_waiting_request():
     migrate_out_request = MagicMock()
 
     # Create an instance of MigrationCoordinator
-    coordinator = MigrationCoordinator(backend_engine, migration_last_stage_max_blocks=1, migration_max_stages=3)
+    coordinator = MigrationCoordinator(backend_engine, BackendType.VLLM, migration_last_stage_max_blocks=1, migration_max_stages=3)
 
     # Test FINISHED
     migrate_out_request.prefill_num_blocks = 3

@@ -11,80 +11,28 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 import uuid
 import asyncio
 import threading
-from typing import Any, Union, Callable, Awaitable, TypeVar
+from typing import Any, Callable, Awaitable, TypeVar, Coroutine, Dict, Optional
+import socket
 from functools import partial
+import pickle
+
 from typing_extensions import ParamSpec
-import ray
-from ray.util.placement_group import PlacementGroup
-from ray.experimental.internal_kv import (
-    _internal_kv_get,
-    _internal_kv_initialized,
-    _internal_kv_put,
-)
 
 from llumnix.logging.logger import init_logger
+from llumnix import envs as llumnix_envs
+from llumnix.constants import MODEL_PATH, DATASET_PATH
 
 logger = init_logger(__name__)
 
-MANAGER_NAME = "manager"
-PLACEMENT_GROUP_NAME_PREFIX = "pg_"
-SERVER_NAME_PREFIX = "server_"
-INSTANCE_NAME_PREFIX = "instance_"
+_MAX_PORT = 65536
 
 P = ParamSpec('P')
 T = TypeVar("T")
 
-
-def initialize_placement_group(
-    placement_group_name: str,
-    num_cpus: int,
-    num_gpus: int,
-    detached: bool = False,
-    block: bool = True
-) -> PlacementGroup:
-    """Initialize the distributed cluster probably with Ray.
-
-    Args:
-        placement_group_name: The name of placement group.
-        num_cpus: The number of cpus in placement group.
-        num_cpus: The number of cpus in placement group.
-        detached: Whether the lifetime of the placement group being detached.
-        block: If True, the function will block until the placement group is ready.
-
-    Returns:
-        `placement_group`. `placement_group` includes the specification
-        of the resources for each distributed worker.
-    """
-    if ray is None:
-        raise ImportError(
-            "Ray is not installed. Please install Ray to use distributed "
-            "serving.")
-
-    lifetime = "detached" if detached else None
-
-    num_gpus_in_cluster = ray.cluster_resources().get("GPU", 0)
-    if num_gpus > num_gpus_in_cluster:
-        raise ValueError(
-            "The number of required GPUs exceeds the total number of "
-            "available GPUs in the cluster.")
-    # Create a new placement group
-    # bundle_0: Llumlet + AsyncPutQueueActor + Worker0, bundle_1-N-1: Worker1...WorkerN-1
-    if num_gpus >= 1:
-        placement_group_specs = ([{"CPU": num_cpus, "GPU": 1}] + [{"GPU": 1}] * (num_gpus - 1))
-    else:
-        placement_group_specs = ([{"CPU": num_cpus}])
-    current_placement_group = ray.util.placement_group(
-        placement_group_specs, "STRICT_PACK", name=placement_group_name, lifetime=lifetime)
-    # Wait until PG is ready - this will block until all
-    # requested resources are available, and will timeout
-    # if they cannot be provisioned.
-    if block:
-        ray.get(current_placement_group.ready(), timeout=1800)
-
-    return current_placement_group
 
 def random_uuid() -> str:
     return str(uuid.uuid4().hex)
@@ -103,94 +51,44 @@ def convert_bytes(bytes_size):
 
     return f"{bytes_size:.2f} {size_suffixes[index]}"
 
-def clear_gloo_backend_state():
-    try:
-        # clear gloo migrate backend intermediate state
-        ray.kill(ray.get_actor("gloo_queue", "llumnix"))
-    # pylint: disable=broad-except
-    except Exception:
-        # gloo_queue may not have been created yet; just ignore this error.
-        pass
-
-def get_manager_name() -> str:
-    return MANAGER_NAME
-
-def get_placement_group_name(instance_id: str) -> str:
-    return f"{PLACEMENT_GROUP_NAME_PREFIX}{instance_id}"
-
-def get_server_name(instance_id: str) -> str:
-    return f"{SERVER_NAME_PREFIX}{instance_id}"
-
-def get_instance_name(instance_id: str) -> str:
-    return f"{INSTANCE_NAME_PREFIX}{instance_id}"
-
-def remove_placement_group(instance_id: str) -> bool:
-    try:
-        placement_group = ray.util.get_placement_group(get_placement_group_name(instance_id))
-        # asynchronous api
-        ray.util.remove_placement_group(placement_group)
-        logger.info("Remove placement group {}.".format(instance_id))
-    # pylint: disable=broad-except
-    except Exception:
-        return False
-    return True
-
-def kill_server(instance_id: str) -> bool:
-    try:
-        server = ray.get_actor(get_server_name(instance_id), namespace="llumnix")
-        ray.kill(server)
-        logger.info("Kill server {}.".format(instance_id))
-    # pylint: disable=broad-except
-    except Exception:
-        return False
-    return True
-
-def kill_instance(instance_id: str) -> bool:
-    try:
-        instance = ray.get_actor(get_instance_name(instance_id), namespace="llumnix")
-        ray.kill(instance)
-        logger.info("Kill instance {}.".format(instance_id))
-    # pylint: disable=broad-except
-    except Exception:
-        return False
-    return True
-
-def run_async_func_sync(func):
-    def run_task():
+def run_coroutine_in_new_thread(coro: Coroutine, blocking: bool):
+    def run_coroutine():
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        future = loop.create_task(func)
+        future = loop.create_task(coro)
         loop.run_until_complete(future)
         loop.close()
-    thread = threading.Thread(target=run_task)
+    thread = threading.Thread(target=run_coroutine)
     thread.start()
-    thread.join()
+    if blocking:
+        thread.join()
 
-def _make_key(actor_name: str, data_name: str):
-    """Generate a binary key for the given actor name and data.
+def _get_engine_args_filename(engine_type: str) -> str:
+    return f"engine_args_{engine_type}.pkl"
 
-    Args:
-        actor_name: The name of the actor
-        data_name: The data member of the actor
+def _get_engine_args_filepath(save_path: str, save_key: str = None) -> str:
+    if save_key is not None:
+        save_filepath = os.path.join(save_path, save_key)
+    else:
+        save_filepath = save_path
+    return save_filepath
 
-    Returns:
-        The key to use for storing a the value.
-    """
-    return (actor_name.encode("ascii") + b"." + data_name.encode("ascii"))
+def save_engine_args(engine_type: str, save_path: str, engine_args: Any, save_key: str = None) -> None:
+    engine_args_filename = _get_engine_args_filename(engine_type)
+    save_filepath = _get_engine_args_filepath(save_path, save_key)
+    save_filename = os.path.join(save_filepath, engine_args_filename)
+    os.makedirs(save_filepath, exist_ok=True)
+    with open(save_filename, 'wb') as file:
+        pickle.dump(engine_args, file)
+    logger.info("Save engine arguments of {} engine type as file: {}".format(engine_type, save_filename))
 
-def get_actor_data_from_ray_internal_kv(actor_name: str, data_name: str) -> Union[str, None]:
-    value = None
-    if _internal_kv_initialized():
-        value = _internal_kv_get(_make_key(actor_name, data_name))
-    if value is not None:
-        value = value.decode()
-    logger.info("Get {}.{} from ray internal key-value store, value: {}.".format(actor_name, data_name, value))
-    return value
-
-def put_actor_data_to_ray_internal_kv(actor_name: str, data_name: str, value: Any):
-    if _internal_kv_initialized():
-        _internal_kv_put(_make_key(actor_name, data_name), f"{value}".encode(), overwrite=True)
-        logger.debug("Put {}.{} to ray internal key-value store, value: {}.".format(actor_name, data_name, value))
+def load_engine_args(engine_type: str, load_path: str) -> Any:
+    engine_args_filename = _get_engine_args_filename(engine_type)
+    load_filename = os.path.join(load_path, engine_args_filename)
+    with open(load_filename, 'rb') as file:
+        engine_args =  pickle.load(file)
+    logger.info("Load engine arguments of {} engine type from path: {}".format(engine_type, load_path))
+    return engine_args
 
 def make_async(func: Callable[P, T]) -> Callable[P, Awaitable[T]]:
     """Take a blocking function, and run it on in an executor thread.
@@ -206,3 +104,101 @@ def make_async(func: Callable[P, T]) -> Callable[P, Awaitable[T]]:
         return loop.run_in_executor(executor=None, func=p_func)
 
     return _async_wrapper
+
+def get_service_resouces(service_name: str, num_gpus: int) -> Dict[str, float]:
+    assert service_name in ["prefill", "decode", "no_constraints", None], \
+        "Only support prefill, decode, no_constraints, and None service name currently."
+    if service_name == "prefill":
+        resources = {"PREFILL_GPU": num_gpus}
+    elif service_name == "decode":
+        resources = {"DECODE_GPU": num_gpus}
+    else: # service_name == "no_constraints", service_name is None
+        resources = {}
+    return resources
+
+def get_llumnix_env_vars():
+    llumnix_env_vars = {}
+    env_vars = dict(os.environ)
+    llumnix_keys = list(llumnix_envs.environment_variables.keys())
+    try:
+        # pylint: disable=import-outside-toplevel
+        from vllm import envs as vllm_envs
+        llumnix_keys.extend(list(vllm_envs.environment_variables.keys()))
+    except ImportError:
+        pass
+    for key, value in env_vars.items():
+        if key in llumnix_keys:
+            llumnix_env_vars[key] = value
+
+    return llumnix_env_vars
+
+def get_service_instance_type(service_name: str) -> "InstanceType":
+    # pylint: disable=import-outside-toplevel
+    from llumnix.instance_info import InstanceType
+    assert service_name in ["prefill", "decode"], \
+        "Only specify instance type when the service is prefill or decode."
+    if service_name == "prefill":
+        instance_type = InstanceType.PREFILL
+    else:
+        instance_type = InstanceType.DECODE
+    return instance_type
+
+def get_ip_address():
+    hostname = socket.gethostname()
+    ip_address = socket.gethostbyname(hostname)
+    return ip_address
+
+def _bind_and_close_port(port: Optional[int] = None, host: str = '0.0.0.0') -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        # the SO_REUSEADDR flag tells the kernel to reuse a local socket in TIME_WAIT state,
+        # without waiting for its natural timeout to expire. see https://docs.python.org/3/library/socket.html#example
+        # NOTE(qzhong): Is it a risk to reuse old port before closing it?
+        # s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind((host, port or 0))
+        return s.getsockname()[1]
+
+def _get_port_by_pid(pid: int, start: int, end: int) -> int:
+    assert start < end
+    assert end <= _MAX_PORT
+    return pid % (end - start) + start
+
+def get_free_port() -> int:
+    # try to find a free port based on pid in each 10000 length segment
+    # to avoid port conflict between multiple processes
+    base_port = os.getpid()
+    for i in range(10000, 60000, 10000):
+        port = _get_port_by_pid(base_port, i, i + 10000)
+        if check_free_port(port=port):
+            return port
+    # fallback to random port if pid based port in all segments are occupied
+    return _bind_and_close_port()
+
+def check_free_port(host='0.0.0.0', port=8081):
+    try:
+        _bind_and_close_port(port=port, host=host)
+        return True
+    except socket.error as e:
+        # pylint: disable=no-else-return
+        if e.errno == socket.errno.EADDRINUSE:
+            return False
+        else:
+            raise
+
+def try_convert_to_local_path(data_path: str) -> str:
+    if os.path.isabs(data_path):
+        return data_path
+
+    assert "/" in data_path
+    base_data_name = os.path.basename(data_path)
+
+    base_model_path: str = llumnix_envs.MODEL_PATH if llumnix_envs.MODEL_PATH else MODEL_PATH
+    local_model_path: str = os.path.join(base_model_path, base_data_name)
+    if os.path.exists(local_model_path):
+        return local_model_path
+
+    base_dataset_path: str = llumnix_envs.DATASET_PATH if llumnix_envs.DATASET_PATH else DATASET_PATH
+    local_dataset_path: str = os.path.join(base_dataset_path, base_data_name)
+    if os.path.exists(local_dataset_path):
+        return local_dataset_path
+
+    return data_path

@@ -67,7 +67,7 @@ class SchedulerLlumnix(Scheduler):
             sliding_window=self.cache_config.sliding_window,
             enable_caching=self.cache_config.enable_prefix_caching)
         self.pre_alloc_cache_dict: Dict[str, BlockTable] = {}
-        self.migrating_out_requests_last_stage: List[SequenceGroupLlumnix] = []
+        self.migrating_out_request_last_stage: Dict[str, SequenceGroupLlumnix] = {}
 
     def add_update_instance_info_callback(self, update_instance_info_callback):
         self.update_instance_info_callback = update_instance_info_callback
@@ -104,6 +104,8 @@ class SchedulerLlumnix(Scheduler):
 
     def get_request_incremental_blocks(self, backend_request: LlumnixRequest, pre_stage_num_blocks: int) -> Tuple[List[int], List[int]]:
         seq = backend_request.get_seqs()[0]
+        if seq.seq_id not in self.block_manager.block_tables:
+            return []
         blocks = self.block_manager.get_block_table(seq)    # 获取seq对应的物理block_id
         block_table = self.block_manager.block_tables[seq.seq_id]
         token_ids = backend_request.token_ids
@@ -129,15 +131,17 @@ class SchedulerLlumnix(Scheduler):
         return False
 
     def add_migrating_out_request_last_stage(self, backend_request: SequenceGroupLlumnix) -> None:
-        self.migrating_out_requests_last_stage.append(backend_request)
+        self.migrating_out_request_last_stage[backend_request.request_id] = backend_request
 
-    def remove_migrating_out_request_last_stage(self, backend_request: SequenceGroupLlumnix) -> None:
-        self.migrating_out_requests_last_stage.remove(backend_request)
+    def pop_migrating_out_request_last_stage(self, request_id: str) -> None:
+        assert request_id in self.migrating_out_request_last_stage, \
+            "the request id of migrating out request in last stage should exist in migrating out request last stage"
+        self.migrating_out_request_last_stage.pop(request_id)
 
-    def pop_migrating_out_requests_last_stage(self) -> List[SequenceGroupLlumnix]:
-        migrating_out_request_last_stage = self.migrating_out_requests_last_stage.copy()
-        self.migrating_out_requests_last_stage.clear()
-        return migrating_out_request_last_stage
+    def free_migrating_out_requests_last_stage(self) -> List[SequenceGroupLlumnix]:
+        migrating_out_requests_last_stage = list(self.migrating_out_request_last_stage.values())
+        self.migrating_out_request_last_stage.clear()
+        return migrating_out_requests_last_stage
 
     def pre_alloc(self,
                   request_id: str,

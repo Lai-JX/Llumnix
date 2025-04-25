@@ -11,6 +11,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import torch
+
+
+# examples/offline_inference.py, tests/*
+MODEL_PATH: str = '/mnt/model'
+DATASET_PATH: str = '/mnt/dataset'
+
 # llumnix/manager.py
 CLEAR_REQUEST_INSTANCE_INTERVAL: float = 1000.0
 NO_INSTANCE_RETRY_GENERATE_INTERVAL: float = 1.0
@@ -19,7 +26,8 @@ AUTO_SCALE_UP_INTERVAL: float = 1.0
 WAIT_PLACEMENT_GROUP_TIMEOUT: float = 5.0
 CHECK_DEPLOYMENT_STATES_INTERVAL: float = 30.0
 WATCH_DEPLOYMENT_INTERVAL: float = 10.0
-WATCH_DEPLOYMENT_INTERVAL_PENDING_INSTANCE: float = 120.0
+INSTANCE_READY_TIMEOUT: float = 300.0
+SERVER_READY_TIMEOUT: float = 60.0
 
 # llumnix/global_scheduler/dispatch_scheduler.py
 DISPATCH_LOG_FREQUENCY = 100
@@ -48,10 +56,17 @@ RPC_SOCKET_LIMIT_CUTOFF: int = 2000
 RPC_ZMQ_HWM: int = 0
 RETRY_BIND_ADDRESS_INTERVAL: float = 10.0
 MAX_BIND_ADDRESS_RETRY_TIMES: int = 10
+ZMQ_IO_THREADS: int = 8
 
 # llumnix/entrypoints/utils.py
 MAX_MANAGER_RETRY_TIMES: int = 10
 RETRY_MANAGER_INTERVAL: float = 5.0
+MAX_TASK_RETRIES: int = 10
+RETRIES_INTERVAL: float = 5.0
+
+# llumnix.backends/*/migration_backend.py, llumnix/backends/*/migration_worker.py
+GRPC_MAX_MESSAGE_LENGTH = 1 << 31 - 1
+NUMPY_SUPPORTED_DTYPES_FOR_MIGRATION = [torch.float32, torch.float16]
 
 # llumnix/backends/vllm/llm_engine.py:_update_gpu_mertics
 GPU_FIELDS_MAP = {
