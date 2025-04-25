@@ -69,6 +69,22 @@ class InstanceInfo:
     # manual init infos
     profiling_data: Tuple[str, int, int, float] = None
 
+    # gpu metrics
+    sm_clock: List[float] = None  # GPU clock     use float to align with other metrics
+    mem_clock: List[float] = None  # Memory clock   use float to align with other metrics
+    gr_engine_active: List[float] = None
+    sm_active: List[float] = None
+    sm_occupancy: List[float] = None
+    tensor_active: List[float] = None
+    dram_active: List[float] = None
+    fp32_active: List[float] = None
+    fp16_active: List[float] = None
+    pcie_tx_bytes: List[float] = None
+    pcie_rx_bytes: List[float] = None
+    nvlink_tx_bytes: List[float] = None
+    nvlink_rx_bytes: List[float] = None
+    power: List[float] = None
+
     def __post_init__(self) -> None:
         self.num_available_gpu_blocks = self.num_free_gpu_blocks - self.num_watermark_blocks
         self.num_available_gpu_blocks_waiting = self.num_available_gpu_blocks - self.num_blocks_all_waiting_requests

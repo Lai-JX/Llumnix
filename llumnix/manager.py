@@ -40,7 +40,7 @@ from llumnix.utils import (random_uuid, clear_gloo_backend_state, get_server_nam
                            INSTANCE_NAME_PREFIX, SERVER_NAME_PREFIX, run_async_func_sync)
 from llumnix.entrypoints.utils import LaunchMode
 from llumnix.queue.queue_type import QueueType
-from llumnix.constants import (CLEAR_REQUEST_INSTANCE_INTERVAL, NO_INSTANCE_RETRY_GENERATE_INTERVAL,
+from llumnix.constants import (CLEAR_REQUEST_INSTANCE_INTERVAL, GPU_FIELDS_MAP, NO_INSTANCE_RETRY_GENERATE_INTERVAL,
                                WAIT_ALL_MIGRATIONS_DONE_INTERVAL, AUTO_SCALE_UP_INTERVAL,
                                WAIT_PLACEMENT_GROUP_TIMEOUT, CHECK_DEPLOYMENT_STATES_INTERVAL,
                                WATCH_DEPLOYMENT_INTERVAL, WATCH_DEPLOYMENT_INTERVAL_PENDING_INSTANCE)
@@ -137,16 +137,22 @@ class Manager:
 
         # tasks
         # When manager starts, it automatically connects to all existing instances.
-        run_async_func_sync(self._connect_to_instances())
+        # 会添加instance到self.instances中，其实当前可能还没有instance
+        run_async_func_sync(self._connect_to_instances())   
+        # 每隔polling_interval秒更新instance信息
         asyncio.create_task(self._poll_instance_info_loop(self.polling_interval))
+        # 每隔CLEAR_REQUEST_INSTANCE_INTERVAL秒清空self.request_instance（不会有影响？）目前只发现可能和迁移有关
         asyncio.create_task(self._clear_request_instance_loop(CLEAR_REQUEST_INSTANCE_INTERVAL))
 
         if hasattr(self, "launch_mode") and self.launch_mode == LaunchMode.GLOBAL:
             assert self.entrypoints_args is not None and self.engine_args is not None
             self.last_timeout_instance_id = None
+            # 自动扩展实例，这样不就会倾向于运行最多实例数吗？
             asyncio.create_task(self._auto_scale_up_loop(AUTO_SCALE_UP_INTERVAL))
+            # 周期性检查placement_group、server、instance的状态
             asyncio.create_task(self._check_deployment_states_loop(CHECK_DEPLOYMENT_STATES_INTERVAL))
             if self.manager_args.enable_pd_disagg:
+                # 如果前后两次pending的placement_group相同，则看看是不是全是prefill或decode实例，是的话则需要scale_down
                 asyncio.create_task(self._check_pd_deployment_states_loop(CHECK_DEPLOYMENT_STATES_INTERVAL))
 
     async def generate(self, request_id: str, server_info: ServerInfo, *args, **kwargs,) -> None:
@@ -273,6 +279,7 @@ class Manager:
                 if self.num_instance_info_updates % 100 == 0:
                     logger.debug("Polling instance infos of {} instances starts.".format(self.num_instances))
                 await asyncio.gather(*tasks, return_exceptions=True)
+                # logger.info("{} instance infos are polled.".format(len(instance_infos)))
                 if self.num_instance_info_updates % 100 == 0:
                     logger.debug("Polling instance infos of {} instances ends.".format(self.num_instances))
                 self.num_instance_info_updates += 1
@@ -753,13 +760,16 @@ class Manager:
             'num_seqs',
             'num_blocks_first_waiting_request',
             'num_blocks_all_waiting_requests',
-            'waiting_time_first_waiting_request'])
+            'waiting_time_first_waiting_request']+list(GPU_FIELDS_MAP.values()))
 
     def _log_instance_infos_to_csv(self, instance_infos: List[InstanceInfo]) -> None:
         for instance_info in instance_infos:
             instance_id = instance_info.instance_id
             gpu_cache_usage = instance_info.gpu_cache_usage
             should_log = (gpu_cache_usage > 0) or (gpu_cache_usage == 0 and not self.instance_last_logged_empty[instance_id])
+            # for gpu_field in GPU_FIELDS_MAP.values():
+            #     tmp = getattr(instance_info, gpu_field) 
+            #     print(f"gpu_field: {gpu_field}, tmp: {tmp}")
             if should_log:
                 self.instance_last_logged_empty[instance_id] = (gpu_cache_usage == 0)
                 self.instance_info_csv.writerow([
@@ -781,5 +791,6 @@ class Manager:
                     instance_info.num_seqs,
                     instance_info.num_blocks_first_waiting_request,
                     instance_info.num_blocks_all_waiting_requests,
-                    instance_info.waiting_time_first_waiting_request])
+                    instance_info.waiting_time_first_waiting_request] + 
+                    [getattr(instance_info, gpu_field) for gpu_field in GPU_FIELDS_MAP.values()])
         self.instance_info_file.flush()

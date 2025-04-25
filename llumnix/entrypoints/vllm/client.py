@@ -48,6 +48,8 @@ class LlumnixClientVLLM:
         logger.info("entrypoints receive request {}".format(request_id))
         # pylint: disable=unexpected-keyword-arg
         results_generator = AsyncStream(request_id, cancel=self.abort_request)
+        
+        # 记录request_id和对应的生成器，get_request_outputs_loop会将输出结果放入对应的生成器中
         self.request_streams[request_id] = results_generator
         server_info_copy = copy.deepcopy(self.server_info)
 

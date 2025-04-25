@@ -115,7 +115,7 @@ class MigrationCoordinator:
         """one-stage live migration until last stage for a running request
         """
         try:
-            if migrate_out_request.should_abort_migration():
+            if migrate_out_request.should_abort_migration():    # finished or preempted
                 return MigrationStatus.ABORTED_SRC
 
             pre_stage_num_blocks = sum(migrate_out_request.stage_num_blocks_list)

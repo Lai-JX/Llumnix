@@ -11,6 +11,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from statistics import mean
 import time
 import traceback
 from typing import Any, List, Optional, Union, Iterable, Deque, Tuple
@@ -18,6 +19,7 @@ from collections import defaultdict
 import threading
 import asyncio
 import queue
+from llumnix.constants import GPU_FIELDS_MAP
 import ray
 from ray.util.placement_group import PlacementGroup
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
@@ -43,6 +45,7 @@ from llumnix.backends.utils import AsyncPutQueueActor
 from llumnix.utils import get_instance_name, make_async
 from llumnix import constants
 from llumnix.metrics.timestamps import set_timestamp
+from llumnix.llumlet.dcgm import GPUMonitor
 
 logger = init_logger(__name__)
 
@@ -92,6 +95,8 @@ class LLMEngineLlumnix(_AsyncLLMEngine):
 
         self.disable_async_output_proc = disable_async_output_proc
 
+        self._start_gpu_monitor()
+
     # pylint: disable=W0221
     @classmethod
     def from_engine_args(
@@ -133,6 +138,35 @@ class LLMEngineLlumnix(_AsyncLLMEngine):
             usage_context=usage_context,
         )
         return engine
+
+    def _start_gpu_monitor(self) -> None:
+        workers = self.model_executor.workers + [self.model_executor.driver_dummy_worker]
+        worker_node_and_gpu_ids = [
+            ray.get(worker.get_node_and_gpu_ids.remote())  # type: ignore[attr-defined]
+            for worker in workers
+        ]
+
+        worker_device_ids = []
+        for node_and_gpu_ids in worker_node_and_gpu_ids:
+            worker_device_ids += node_and_gpu_ids[1]
+
+        logger.info(f"worker_device_ids: {worker_device_ids};")
+        self.gpuMpnitor = GPUMonitor(worker_device_ids, 1000, 10)
+        self.gpuMpnitor.start()
+
+    def _update_gpu_mertics(self, instance_info: Optional[InstanceInfo] = None) -> None:
+        if self.gpuMpnitor and instance_info:
+            # Get the GPU metrics from the GPU monitor.
+            gpu_metrics = self.gpuMpnitor.get_gpu_metrics()
+            for gpu_metric, mstric_values in gpu_metrics.items():
+                mstric_value_mean_all = []
+                for device_id, metric_value in mstric_values.items():
+                    if len(metric_value) > 0:
+                        mstric_value_mean_all.append(mean(metric_value))
+                if hasattr(instance_info, GPU_FIELDS_MAP[gpu_metric]):
+                    setattr(instance_info, GPU_FIELDS_MAP[gpu_metric], mstric_value_mean_all)
+                    # logger.info(f"gpu metric {GPU_FIELDS_MAP[gpu_metric]}: {getattr(instance_info, GPU_FIELDS_MAP[gpu_metric])}")
+                
 
     # pylint: disable=inconsistent-return-statements
     def _process_model_outputs(self,
@@ -253,6 +287,7 @@ class LLMEngineLlumnix(_AsyncLLMEngine):
             instance_info.timestamp = self.instance_info.timestamp
             instance_info.profiling_data = self.instance_info.profiling_data
             instance_info.num_blocks_last_running_request = self.instance_info.num_blocks_last_running_request
+            self._update_gpu_mertics(instance_info)
         self.instance_info = instance_info
 
     def add_request(self, request_id: str, server_info: ServerInfo, expected_steps: int, *args, **kwargs):
@@ -428,6 +463,7 @@ class BackendVLLM(BackendInterface):
         return self.engine.scheduler[0].get_request_incremental_blocks(*args, **kwargs)
 
     # pylint: disable=invalid-overridden-method
+    # 迁移时需要调用到
     async def remove_running_request(self, request_id: str) -> bool:
         step_done_event = asyncio.Event()
         self._step_done_event_queue.put((request_id, step_done_event))

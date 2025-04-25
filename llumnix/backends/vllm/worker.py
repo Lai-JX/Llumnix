@@ -45,6 +45,9 @@ class MigrationWorker(Worker):
     def load_model(self):
         torch.cuda.set_device(self.device)
         return super().load_model()
+    
+    def get_device_id(self):
+        return self.device
 
     def get_global_rank(self):
         return self.global_rank

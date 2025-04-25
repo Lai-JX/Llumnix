@@ -41,7 +41,7 @@ class BlockManagerLlumnix(SelfAttnBlockSpaceManager):
             max_block_sliding_window=self.max_block_sliding_window,
         )
         if (num_free_gpu_blocks - num_required_blocks >=
-                self.watermark_blocks):
+                self.watermark_blocks): # watermark_blocks: 在达到内存不足前，还能在GPU上分配多少个块。
             block_table.allocate(token_ids)
 
         return block_table
@@ -104,9 +104,11 @@ class SchedulerLlumnix(Scheduler):
 
     def get_request_incremental_blocks(self, backend_request: LlumnixRequest, pre_stage_num_blocks: int) -> Tuple[List[int], List[int]]:
         seq = backend_request.get_seqs()[0]
-        blocks = self.block_manager.get_block_table(seq)
+        blocks = self.block_manager.get_block_table(seq)    # 获取seq对应的物理block_id
         block_table = self.block_manager.block_tables[seq.seq_id]
         token_ids = backend_request.token_ids
+        # num_full_slots: The number of tokens currently stored in the blocks.
+        # 返回新增块的物理id和新增的token_id
         return blocks[pre_stage_num_blocks:], token_ids[pre_stage_num_blocks * self.block_manager.block_size:block_table.num_full_slots]
 
     def remove_running_request(self, request_id: str) -> bool:

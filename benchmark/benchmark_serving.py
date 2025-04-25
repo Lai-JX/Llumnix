@@ -29,6 +29,7 @@ from scipy.stats import zipf
 from enum import Enum
 from transformers import AutoTokenizer
 from typing import List
+import pickle
 
 
 num_finished_requests = 0
@@ -679,7 +680,7 @@ def main():
     parser.add_argument('--random_prompt_lens_range', type=int)
     parser.add_argument('--variable_prompt_lens_distribution', choices=[
                         "uniform", "exponential", "capped_exponential", "zipf"], default="uniform")
-    parser.add_argument('--random_prompt_count', type=int)
+    parser.add_argument('--random_prompt_count', type=int)      # 请求数
     parser.add_argument('--max_request_len', type=int, default=8192)
 
     parser.add_argument(
@@ -718,63 +719,72 @@ def main():
 
     backend = GenerationBackend[args.backend]
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer, trust_remote_code=args.trust_remote_code)
-    print(tokenizer)
 
-    if args.dataset_type:
-        random.seed(0xCADE)
-        np.random.seed(0xCADE)
-        if args.dataset_type=="sharegpt":
-            prompts, prompt_lens, response_lens= sample_sharegpt_requests(args.dataset_path, args.random_prompt_count ,tokenizer, args.max_request_len)
-        elif args.dataset_type=="burstgpt":
-            prompts, prompt_lens, response_lens= sample_burstgpt_request(args.dataset_path, args.random_prompt_count ,tokenizer, args.max_request_len)
-        elif args.dataset_type=="arxiv":
-            prompts, prompt_lens, response_lens= sample_arxiv_request(args.dataset_path, args.random_prompt_count ,tokenizer, args.max_request_len)
-        num_prompts = len(prompts)
-    elif args.gen_random_prompts:
-        num_prompts = args.random_prompt_count
-        random.seed(0xCADE)
-        np.random.seed(0xCADE)
-        prompts, prompt_lens = gen_random_prompts_return_lens(
-            tokenizer,
-            distribution=args.variable_prompt_lens_distribution,
-            len_mean=args.random_prompt_lens_mean,
-            len_range=args.random_prompt_lens_range,
-            num_prompts=num_prompts,
-            vocab_ids_to_exclude=tokenizer.all_special_ids,
-        )
-    else:
-        raise ValueError("unknown prompts")
+    prompt_path = f'/workspace/llm-serve/Llumnix/logs/l40-pdd-4/{args.tokenizer.split("/")[-1]}/{args.distribution}/benchmark_pdd_tp1_{args.random_prompt_count}_4_prompts.pkl'
+    print(prompt_path)
+    if not os.path.exists(prompt_path):
 
-    if args.allow_variable_generation_length:
-        response_lens = gen_random_response_lens(
-            args.variable_response_lens_distribution, args.variable_response_lens_mean, args.variable_response_lens_range, num_prompts=num_prompts)
-        args.fixed_max_tokens = -1
+        if args.dataset_type:
+            random.seed(0xCADE)
+            np.random.seed(0xCADE)
+            if args.dataset_type=="sharegpt":
+                prompts, prompt_lens, response_lens= sample_sharegpt_requests(args.dataset_path, args.random_prompt_count ,tokenizer, args.max_request_len)
+            elif args.dataset_type=="burstgpt":
+                prompts, prompt_lens, response_lens= sample_burstgpt_request(args.dataset_path, args.random_prompt_count ,tokenizer, args.max_request_len)
+            elif args.dataset_type=="arxiv":
+                prompts, prompt_lens, response_lens= sample_arxiv_request(args.dataset_path, args.random_prompt_count ,tokenizer, args.max_request_len)
+            num_prompts = len(prompts)
+        elif args.gen_random_prompts:
+            num_prompts = args.random_prompt_count
+            random.seed(0xCADE)
+            np.random.seed(0xCADE)
+            prompts, prompt_lens = gen_random_prompts_return_lens(
+                tokenizer,
+                distribution=args.variable_prompt_lens_distribution,
+                len_mean=args.random_prompt_lens_mean,
+                len_range=args.random_prompt_lens_range,
+                num_prompts=num_prompts,
+                vocab_ids_to_exclude=tokenizer.all_special_ids,
+            )
+        else:
+            raise ValueError("unknown prompts")
 
-    for i, (prompt_len, gen_len) in enumerate(zip(prompt_lens, response_lens)):
-        total = prompt_len + gen_len
-        if total > args.max_request_len:
-            print(f'truncating long prompt+gen_len {prompt_len=} {gen_len=}')
-            gen_len = args.max_request_len - prompt_len
-        response_lens[i] = gen_len
+        if args.allow_variable_generation_length:
+            response_lens = gen_random_response_lens(
+                args.variable_response_lens_distribution, args.variable_response_lens_mean, args.variable_response_lens_range, num_prompts=num_prompts)
+            args.fixed_max_tokens = -1
 
-    if args.print_generation_lens_and_exit:
-        print(f'{prompt_lens=}')
-        print(f'{response_lens=}')
-        print('Exiting...')
-        return
-
-    if args.verbose or True:
-        print('prompt lens', sorted(list(prompt_lens)))
-        print('response lens', sorted(list(response_lens)))
-        total_tokens = []
         for i, (prompt_len, gen_len) in enumerate(zip(prompt_lens, response_lens)):
-            total_tokens.append(prompt_len + gen_len)
-        print('total tokens', sorted(list(total_tokens)))
+            total = prompt_len + gen_len
+            if total > args.max_request_len:
+                print(f'truncating long prompt+gen_len {prompt_len=} {gen_len=}')
+                gen_len = args.max_request_len - prompt_len
+            response_lens[i] = gen_len
 
-    plot_len_cdf(prompt_lens, response_lens, total_tokens, args.log_filename)
+        if args.print_generation_lens_and_exit:
+            print(f'{prompt_lens=}')
+            print(f'{response_lens=}')
+            print('Exiting...')
+            return
 
-    prompts = list(zip(prompts, prompt_lens, response_lens))
+        if args.verbose or True:
+            print('prompt lens', sorted(list(prompt_lens)))
+            print('response lens', sorted(list(response_lens)))
+            total_tokens = []
+            for i, (prompt_len, gen_len) in enumerate(zip(prompt_lens, response_lens)):
+                total_tokens.append(prompt_len + gen_len)
+            print('total tokens', sorted(list(total_tokens)))
 
+        plot_len_cdf(prompt_lens, response_lens, total_tokens, args.log_filename)
+
+        prompts = list(zip(prompts, prompt_lens, response_lens))
+        # 保存 prompts 到文件
+        with open(prompt_path, 'wb') as f:
+            pickle.dump(prompts, f)
+    else:
+        # 从文件加载 prompts
+        with open(prompt_path, 'rb') as f:
+            prompts = pickle.load(f)
     throughput, \
     prefill_token_latencies, \
     decode_token_latencies, \

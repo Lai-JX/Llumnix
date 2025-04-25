@@ -45,7 +45,7 @@ class LlumnixRequest:
         # migration args
         self.last_preemption_time = None
         self.stage_timestamps = []
-        self.stage_num_blocks_list = []
+        self.stage_num_blocks_list = [] # The number of blocks in each stage
         self.try_schedule_times = 0
         self._status = None
         self.migration_start_time = None

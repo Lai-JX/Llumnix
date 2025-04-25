@@ -34,6 +34,7 @@ from llumnix.arg_utils import InstanceArgs
 from llumnix.utils import get_instance_name
 from llumnix.constants import CHECK_ENGINE_STATE_INTERVAL
 from llumnix.metrics.timestamps import set_timestamp
+# from llumnix.llumlet.dcgm import GPUMonitor
 
 logger = init_logger(__name__)
 
@@ -52,8 +53,8 @@ class Llumlet:
             self.actor_id = ray.get_runtime_context().get_actor_id()
             self.node_id = ray.get_runtime_context().get_node_id()
             self.instance_id = instance_id
-            logger.info("Llumlet(job_id={}, worker_id={}, actor_id={}, node_id={}, instance_id={})".format(
-                            self.job_id, self.worker_id, self.actor_id, self.node_id, self.instance_id))
+            logger.info("Llumlet(job_id={}, worker_id={}, actor_id={}, node_id={}, instance_id={}, type={})".format(
+                            self.job_id, self.worker_id, self.actor_id, self.node_id, self.instance_id, instance_args.instance_type))
             logger.info("Llumlet backend type: {}".format(backend_type))
             self.instance_args: InstanceArgs = instance_args
             self.actor_name = get_instance_name(instance_id)
@@ -76,6 +77,20 @@ class Llumlet:
             self.migration_scheduler = LocalMigrationScheduler(migration_config.request_migration_policy,
                                                                self.backend_engine)
             self.log_requests = True
+
+            # workers = self.backend_engine.engine.model_executor.workers + [self.backend_engine.engine.model_executor.driver_dummy_worker]
+            # worker_node_and_gpu_ids = [
+            #     ray.get(worker.get_node_and_gpu_ids.remote())  # type: ignore[attr-defined]
+            #     for worker in workers
+            # ]
+
+            # worker_device_ids = []
+            # for node_and_gpu_ids in worker_node_and_gpu_ids:
+            #     worker_device_ids += node_and_gpu_ids[1]
+            # worker_device_ids = [str(x) for x in worker_device_ids]
+            # logger.info(f"worker_device_ids: {worker_device_ids};")
+            # self.gpuMpnitor = GPUMonitor(",".join(worker_device_ids), 1000, 10)
+            # self.gpuMpnitor.start()
 
             asyncio.create_task(self._check_engine_state_loop())
         # pylint: disable=broad-except

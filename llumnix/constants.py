@@ -52,3 +52,24 @@ MAX_BIND_ADDRESS_RETRY_TIMES: int = 10
 # llumnix/entrypoints/utils.py
 MAX_MANAGER_RETRY_TIMES: int = 10
 RETRY_MANAGER_INTERVAL: float = 5.0
+
+# llumnix/backends/vllm/llm_engine.py:_update_gpu_mertics
+GPU_FIELDS_MAP = {
+    # dcgmi field id
+    "100": "sm_clock",
+    "101": "mem_clock",
+
+    "1001": "gr_engine_active",
+    "1002": "sm_active",
+    "1003": "sm_occupancy",
+    "1004": "tensor_active",
+    "1005": "dram_active",
+    "1007": "fp32_active",
+    "1008": "fp16_active",
+    "1009": "pcie_tx_bytes",
+    "1010": "pcie_rx_bytes",
+    "1011": "nvlink_tx_bytes",
+    "1012": "nvlink_rx_bytes",
+    # power
+    "power": "power"
+}

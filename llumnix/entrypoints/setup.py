@@ -118,6 +118,7 @@ def init_llumnix_components(entrypoints_args: EntrypointsArgs,
                             engine_args,
                             launch_args: LaunchArgs,
                             ) -> Tuple[Manager, List[str], List[Llumlet], QueueServerBase]:
+    # 基于ray创建或获取所有实例共用的Manager
     manager = init_manager(manager_args)
 
     backend_type: BackendType = launch_args.backend_type

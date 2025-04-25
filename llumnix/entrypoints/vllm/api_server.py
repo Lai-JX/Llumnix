@@ -43,9 +43,11 @@ llumnix_client: LlumnixClientVLLM = None
 # pylint: disable=unused-argument
 @asynccontextmanager
 async def lifespan(fastapi_app: FastAPI):
+    # 启动前操作: 启动输出队列服务
     asyncio.create_task(llumnix_client.request_output_queue.run_server_loop())
     asyncio.create_task(llumnix_client.get_request_outputs_loop())
     yield
+    # 关闭后操作
     llumnix_client.request_output_queue.cleanup()
 
 app = FastAPI(lifespan=lifespan)
@@ -179,6 +181,7 @@ if __name__ == "__main__":
     parser.add_argument("--log-level", type=str, choices=["debug", "info", "warning", "error"])
 
     cli_args = add_cli_args(parser)
+    # 加载配置文件并将命令行参数覆盖到配置中，返回最终的配置对象
     cfg = get_llumnix_config(cli_args.config_file, cli_args)
 
     entrypoints_args, manager_args, instance_args, engine_args = get_args(cfg, LaunchMode.LOCAL, parser, cli_args)
