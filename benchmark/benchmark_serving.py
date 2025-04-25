@@ -744,6 +744,7 @@ def main():
 
     parser.add_argument('--enable_migration', type=int ,default=0)
     parser.add_argument('--priority_ratio', type=float ,default=0.0)
+    parser.add_argument('--prompt_save_dir', type=str, default='/workspace/llm-serve/Llumnix/logs/l40')
 
     args = parser.parse_args()
 
@@ -752,8 +753,13 @@ def main():
 
     backend = GenerationBackend[args.backend]
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer, trust_remote_code=args.trust_remote_code)
-
-    prompt_path = f'/workspace/llm-serve/Llumnix/logs/l40-pdd-4/{args.tokenizer.split("/")[-1]}/{args.distribution}/benchmark_pdd_tp1_{args.random_prompt_count}_4_prompts.pkl'
+    try:
+        # prompt_save_dir = f'{args.prompt_save_dir}/{args.tokenizer.split("/")[-1]}/{args.distribution}'
+        prompt_save_dir = args.prompt_save_dir
+        os.makedirs(prompt_save_dir, exist_ok=True)
+    except FileExistsError:
+        pass
+    prompt_path = f'{prompt_save_dir}/benchmark_pdd_tp1_{args.random_prompt_count}_4_prompts.pkl'
     print(prompt_path)
     if not os.path.exists(prompt_path):
 

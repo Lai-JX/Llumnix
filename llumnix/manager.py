@@ -43,8 +43,8 @@ from llumnix.scaler import Scaler
 from llumnix.constants import (CLEAR_REQUEST_INSTANCE_INTERVAL, GPU_FIELDS_MAP, NO_INSTANCE_RETRY_GENERATE_INTERVAL,
                                WAIT_ALL_MIGRATIONS_DONE_INTERVAL, AUTO_SCALE_UP_INTERVAL,
                                WAIT_PLACEMENT_GROUP_TIMEOUT, CHECK_DEPLOYMENT_STATES_INTERVAL,
-                               WATCH_DEPLOYMENT_INTERVAL, WATCH_DEPLOYMENT_INTERVAL_PENDING_INSTANCE)
-from llumnix.launcher import Launcher
+                               WATCH_DEPLOYMENT_INTERVAL, )
+# from llumnix.launcher import Launcher
 from llumnix.metrics.timestamps import set_timestamp
 from llumnix.entrypoints.api_server_actor import APIServerActor
 

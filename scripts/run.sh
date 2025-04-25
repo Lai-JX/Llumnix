@@ -9,11 +9,25 @@ REQ_NUM=$2
 nvidia-smi -pl 300
 nvidia-smi -pm ENABLED
 nvidia-smi -acp 0
+#读取MODEL，设置默认值
+MODEL=${3:-"llama-2-7b"}
+DISTRIBUTION=${4:-"poisson"}     # "burst", "uniform", "poisson", "gamma"
+if [ "$MODEL" == "llama-2-7b" ]; then
+    MODEL_PATH="/share/models/llama-2-7b"
+elif [ "$MODEL" == "llama-2-13b" ]; then
+    MODEL_PATH="/share/models/llama-2-13b"
+elif [ "$MODEL" == "llama-7b" ]; then
+    MODEL_PATH="/share/models/llama/llama-7b"
+fi
+echo "模型路径: $MODEL_PATH"
+
+BASE_DIR='/workspace/llm-serve/Llumnix/logs/l40/'$MODEL/$DISTRIBUTION
+mkdir -p $BASE_DIR
 
 # 定义两个数组
 # sm_clocks=("1005" "1275" "1500" "2100")    # 1005, 1275, 1500, 2100
 # mem_clocks=("8001")
-sm_clocks=("2490" "2085" "1695" "1290" "885")    # 1005, 1275, 1500, 2100
+sm_clocks=("2490")    # "2085" "1695" "1290" "885"
 # sm_clocks=("2085")    # 1005, 1275, 1500, 2100
 mem_clocks=("9001")
 
@@ -24,12 +38,12 @@ Llumnix_benchmark() {
                     --port 1234 \
                     --initial-instances 1 \
                     --launch-ray-cluster \
-                    --model /share/models/llama/llama-7b \
+                    --model $MODEL_PATH \
                     --worker-use-ray \
                     --migration-backend rayrpc \
                     --log-instance-info \
                     --tensor-parallel-size $1 \
-                    --log-filename /workspace/llm-serve/Llumnix/logs/serve_tp$1_$2_$3_$4 &
+                    --log-filename $BASE_DIR/serve_tp$1_$2_$3_$4 &
 
     # 判断$HEAD_NODE_IP:1234是否可用 
     INTERVAL=2
@@ -46,15 +60,15 @@ Llumnix_benchmark() {
     # 添加负载
     python /workspace/llm-serve/Llumnix/benchmark/benchmark_serving.py \
         --ip_ports $HEAD_NODE_IP:1234 \
-        --tokenizer /share/models/llama/llama-7b \
+        --tokenizer $MODEL_PATH \
         --random_prompt_count $2 \
         --dataset_type "sharegpt" \
         --dataset_path /workspace/llm-serve/sharegpt_gpt4.jsonl \
-        --distribution "poisson" \
+        --distribution $DISTRIBUTION \
         --log_latencies \
         --fail_on_response_failure \
-        --distribution "burst" \
-        --log_filename /workspace/llm-serve/Llumnix/logs/benchmark_tp$1_$2_$3_$4
+        --prompt_save_dir $BASE_DIR \
+        --log_filename $BASE_DIR/benchmark_tp$1_$2_$3_$4
 
     # 关闭服务
     ./kill.sh
