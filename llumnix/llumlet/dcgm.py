@@ -60,10 +60,10 @@ class DCGMMonitor:
                 check=True,
                 timeout=10
             )
-            logger.debug(f"[DEBUG] dcgmi discovery 输出:\n{result.stdout.strip()}")
+            logger.debug(f"[DEBUG] dcgmi discovery:\n{result.stdout.strip()}")
         except subprocess.CalledProcessError as e:
-            logger.warning(f"[WARNING] dcgmi discovery 命令执行失败: {e.stderr.strip()}")
-            logger.info("[INFO] 尝试启动 nv-hostengine 并重试...")
+            logger.warning(f"[WARNING] dcgmi discovery fail: {e.stderr.strip()}")
+            logger.info("[INFO] starting nv-hostengine ...")
             try:
                 subprocess.run(
                     ["nv-hostengine"],
@@ -79,7 +79,7 @@ class DCGMMonitor:
                     check=True,
                     timeout=10
                 )
-                logger.debug(f"[DEBUG] dcgmi discovery 输出（重试后）:\n{result.stdout.strip()}")
+                logger.debug(f"[DEBUG] dcgmi discovery(after starting nv-hostengine):\n{result.stdout.strip()}")
             except subprocess.CalledProcessError as retry_error:
                 raise RuntimeError(f"dcgmi discovery 命令重试失败: {retry_error.stderr.strip()}")
             except Exception as retry_exception:
@@ -102,8 +102,8 @@ class DCGMMonitor:
             if len(field_ids) == 0:
                 raise ValueError("未找到有效的 Field IDs")
             field_ids = sorted(field_ids, key=int)  # 按数值排序
-            logger.debug(f"[DEBUG] 提取到 {len(field_ids)} 个监控指标")
-            logger.info(f"[DEBUG] 提取到的 Field IDs: {field_ids}")
+            logger.debug(f"[DEBUG] discovery {len(field_ids)} gpu metrics")
+            logger.info(f"[DEBUG]  Field IDs: {field_ids}")
             return field_ids
         except subprocess.CalledProcessError as e:
             logger.error(f"[ERROR] dcgmi 命令执行失败: {e.stderr.strip()}")
@@ -129,7 +129,7 @@ class DCGMMonitor:
                 text=True,
                 start_new_session=True
             )
-            logger.info(f"[INFO] DCGM 监控已启动 | 设备: {self.device_ids} | PID: {self._process.pid}")
+            logger.info(f"[INFO] DCGM Monitor started | devices: {self.device_ids} | PID: {self._process.pid}")
 
             self._stop_thread.clear()
             self._reader_thread = threading.Thread(target=self._read_output)
@@ -147,7 +147,7 @@ class DCGMMonitor:
                 return
             # 存储原始输出行
             self._output_lines.append(line.strip())
-            logger.debug(f"[DEBUG] 实时输出: {line.strip()}")
+            # logger.debug(f"[DEBUG] 实时输出: {line.strip()}")
             # 提取各指标
             metrics = line.strip().split()
             device_id, metrics = int(metrics[1]), metrics[2:]
@@ -182,7 +182,7 @@ class DCGMMonitor:
                     os.killpg(pgid, signal.SIGKILL)
                     self._process.wait()
 
-                logger.info(f"[INFO] DCGM 监控已停止 | 设备: {self.device_ids}")
+                logger.info(f"[INFO] DCGM Monitor stopped | devices: {self.device_ids}")
             except Exception as e:
                 logger.error(f"[ERROR] 停止 DCGM 监控失败: {str(e)}")
             finally:
@@ -260,7 +260,7 @@ class PowerMonitor:
         self._stop_thread.clear()
         self._monitor_thread = threading.Thread(target=self._monitor_power)
         self._monitor_thread.start()
-        logger.info(f"[INFO] Power 监控已启动 | 设备: {self.device_ids} | Thread Native ID: {threading.get_native_id()}")
+        logger.info(f"[INFO] Power Monitor started | devices: {self.device_ids} | Thread Native ID: {threading.get_native_id()}")
     def _monitor_power(self):
         """监控功耗的线程"""
         try:
@@ -272,14 +272,14 @@ class PowerMonitor:
                     power = pynvml.nvmlDeviceGetPowerUsage(handle) / 1000.0  # 转换为瓦特
                     self.metrics_data[gpu_index].append(power)
                     power_readings.append(power)
-                logger.debug(f"[DEBUG] 实时输出: {power_readings}")
+                # logger.debug(f"[DEBUG] 实时输出: {power_readings}")
 
                 if self.max_output_lines > 0 and len(self._output_lines) >= self.max_output_lines:
                     self._output_lines.popleft()
                 entry = {"timestamp": timestamp, "power": power_readings}
                 self._output_lines.append(entry)
 
-                logger.debug(f"[DEBUG] Power Data: {entry}")  # 打印当前功耗数据
+                # logger.debug(f"[DEBUG] Power Data: {entry}")  # 打印当前功耗数据
                 time.sleep(self.interval_ms)
         except Exception as e:
             logger.error(f"[ERROR] 监控功耗失败: {str(e)}")

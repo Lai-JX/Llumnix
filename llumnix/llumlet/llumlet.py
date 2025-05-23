@@ -175,11 +175,23 @@ class Llumlet:
             migrate_out_request.is_migrating = True
 
         migrated_request_list = []
+        logger.info("[LJX] Llumlet._migrate_out start, timestamps: {}".format(time.time()))
         for migrate_out_request in migrate_out_requests:
+
+            migrate_out_one_request_begin = time.time()
+            logger.info("[LJX] Llumlet._migrate_out_one_request start, {}, timestamps: {}".format(migrate_out_request.request_id, migrate_out_one_request_begin))
+            set_timestamp(migrate_out_request.server_info, "migrate_out_one_request_begin", time.time())
+            
             migrated_request = await self._migrate_out_one_request(migrate_out_request, dst_instance_id, dst_instance_actor_handle)
+            
+            migrate_out_one_request_end = time.time()
+            logger.info("[LJX] Llumlet._migrate_out_one_request end, {}, timestamps: {}".format(migrate_out_request.request_id, migrate_out_one_request_end))
+            logger.info("[LJX] Llumlet._migrate_out_one_request latency: {} ms".format((migrate_out_one_request_end - migrate_out_one_request_begin)*1000))
+            
             migrated_request_list.extend(migrated_request)
             if len(migrated_request) == 0 and migrate_out_request.eom:
                 break
+        logger.info("[LJX] Llumlet._migrate_out end, timestamps: {}".format(time.time()))
 
         return migrated_request_list
 
@@ -202,6 +214,7 @@ class Llumlet:
                 return migrated_request
 
             if status == MigrationStatus.FINISHED:
+                set_timestamp(migrate_out_request.server_info, "migrate_out_one_request_end", time.time())
                 await dst_instance_actor_handle.execute_engine_method_async.remote("commit_dst_request", migrate_out_request)
                 self.backend_engine.free_src_request(migrate_out_request)
                 self.backend_engine.pop_migrating_out_request_last_stage(migrate_out_request)

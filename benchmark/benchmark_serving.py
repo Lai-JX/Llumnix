@@ -75,13 +75,14 @@ class GenerationBackend(str, Enum):
     RayGen = "RayGen"
     FasterTransformer = "FasterTransformer"
 
-def vllm_server_req_func(prompt, output_len):
+def vllm_server_req_func(prompt, prompt_len, output_len):
     request_dict = {
         "prompt": prompt,
         "n": 1,
         "best_of": 1,
         "temperature": 0.0,
         "top_k": 1,
+        "prompt_len": prompt_len,
         "max_tokens": max(output_len, 1),
         "ignore_eos": True,
         "stream": False,
@@ -123,7 +124,7 @@ async def inner_query_model(prompt, verbose, ip_ports, server_req_func):
     global num_finished_requests
 
     async with aiohttp.ClientSession(timeout=timeout) as session:
-        request = server_req_func(prompt, expected_response_len)
+        request = server_req_func(prompt, prompt_len, expected_response_len)
         if verbose:
             print('Querying model')
         try:
@@ -392,6 +393,16 @@ def save_all_decode_token_latencies_npy(all_token_latencies: List[np.ndarray], l
     all_lat_pairs = np.sort(all_lat_pairs,order='timestamp')
     np.save(os.path.splitext(log_filename)[0], all_lat_pairs)
 
+def print_latency(output):
+    # output = {
+    #     'request_id': request_id,
+    #     'generated_text': generation,
+    #     'num_output_tokens_cf': num_output_tokens,    # 实际输出长度
+    #     'per_token_latency': per_token_latency,
+    #     'response_len' = expected_response_len        # 期望输出长度
+    # }
+    pass
+
 class MeasureLatency:
     def __init__(self):
         self._request_ids = []
@@ -409,7 +420,17 @@ class MeasureLatency:
     def measure(self, f):
         async def measured(*args, **kwargs):
             start = time.time()
-            prompt, output = await f(*args, **kwargs)
+            prompt, output = await f(*args, **kwargs)       # inner_query_model(server_req_func=vllm_server_req_func)
+
+            # output
+            # ret = {
+            #     'request_id': request_id,
+            #     'generated_text': generation,
+            #     'num_output_tokens_cf': num_output_tokens,    # 实际输出长度
+            #     'per_token_latency': per_token_latency,
+            #     'per_token_latency_breakdown_list': per_token_latency_breakdown_list # 在Llumnix启动--log-request-timestamps时有效
+            # }
+
             # Do not record latency if request failed.
             if 'generated_text' in output:
                 latency = time.time() - start
@@ -422,7 +443,7 @@ class MeasureLatency:
                     pass
             if 'request_id' in output:
                 self._request_ids.append(output['request_id'])
-            if 'per_token_latency' in output:
+            if 'per_token_latency' in output:       # [[timestamp, latency]...]
                 lat_arr = np.array(output['per_token_latency'])
                 mean_decode_token_latency = 0 if len(lat_arr) == 1 else np.mean(lat_arr[1:,1])
                 decode_sum_latency = 0 if len(lat_arr) == 1 else np.sum(lat_arr[1:,1])
@@ -698,6 +719,49 @@ def sample_arxiv_request(
                 break
     return prompts, prompt_lens, response_lens
 
+def get_max_request_len(tokenizer, max_request_len):
+    # 直接通过 tokenizer 获取
+    tokenizer_tmp = AutoTokenizer.from_pretrained(tokenizer, trust_remote_code=True)
+
+    max_request_len = tokenizer_tmp.model_max_length
+
+    # 如果 model_max_length 无效，则通过配置获取
+    if max_request_len > 1e6:  # 检查是否异常大
+        from transformers import AutoConfig
+        config = AutoConfig.from_pretrained(tokenizer)
+        print(config)
+        # 尝试不同参数名
+        max_request_len = getattr(config, "max_position_embeddings", None)
+        if max_request_len is None:
+            max_request_len = getattr(config, "n_positions", max_request_len)  # 默认值可选
+    return max_request_len
+
+def warm_up(backend, tokenizer, prompts, args):
+    throughput, \
+    prefill_token_latencies, \
+    decode_token_latencies, \
+    inference_latencies, \
+    avg_instance_num, \
+    request_latencies, \
+    request_ids, \
+    decode_sum_latencies, \
+    request_lens, \
+    all_decode_token_latencies, \
+    per_token_latency_breakdown_list = asyncio.run(benchmark(
+        backend,
+        tokenizer,
+        prompts,
+        args.allow_variable_generation_length,
+        args.verbose,
+        args.log_filename,
+        args.ip_ports,
+        args.distribution,
+        args.qps,
+        args.coefficient_variation,
+        args.log_latencies,
+        args.fail_on_response_failure,
+    ))
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--tokenizer", type=str, required=True,
@@ -714,7 +778,7 @@ def main():
     parser.add_argument('--variable_prompt_lens_distribution', choices=[
                         "uniform", "exponential", "capped_exponential", "zipf"], default="uniform")
     parser.add_argument('--random_prompt_count', type=int)      # 请求数
-    parser.add_argument('--max_request_len', type=int, default=8192)
+    parser.add_argument('--max_request_len', type=int, default=-1)
 
     parser.add_argument(
         '--distribution', choices=["burst", "uniform", "poisson", "gamma"], default="poisson")
@@ -744,7 +808,7 @@ def main():
 
     parser.add_argument('--enable_migration', type=int ,default=0)
     parser.add_argument('--priority_ratio', type=float ,default=0.0)
-    parser.add_argument('--prompt_save_dir', type=str, default='/workspace/llm-serve/Llumnix/logs/l40')
+    parser.add_argument('--prompt_save_path', type=str, default='/workspace/llm-serve/Llumnix/logs/l40')
 
     args = parser.parse_args()
 
@@ -753,13 +817,20 @@ def main():
 
     backend = GenerationBackend[args.backend]
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer, trust_remote_code=args.trust_remote_code)
-    try:
-        # prompt_save_dir = f'{args.prompt_save_dir}/{args.tokenizer.split("/")[-1]}/{args.distribution}'
-        prompt_save_dir = args.prompt_save_dir
-        os.makedirs(prompt_save_dir, exist_ok=True)
-    except FileExistsError:
-        pass
-    prompt_path = f'{prompt_save_dir}/benchmark_pdd_tp1_{args.random_prompt_count}_4_prompts.pkl'
+    
+    if args.max_request_len == -1:
+        max_request_len = get_max_request_len(args.tokenizer, args.max_request_len)
+        assert max_request_len > 0, f"max_request_len should be greater than 0, got {max_request_len}"
+    else:
+        max_request_len = args.max_request_len
+    print(f'max_request_len {max_request_len}')
+    # try:
+    #     # prompt_save_dir = f'{args.prompt_save_dir}/{args.tokenizer.split("/")[-1]}/{args.distribution}'
+    #     prompt_save_dir = args.prompt_save_dir
+    #     os.makedirs(prompt_save_dir, exist_ok=True)
+    # except FileExistsError:
+    #     pass
+    prompt_path = f'{args.prompt_save_path}_prompt.pkl'
     print(prompt_path)
     if not os.path.exists(prompt_path):
 
@@ -767,11 +838,11 @@ def main():
             random.seed(0xCADE)
             np.random.seed(0xCADE)
             if args.dataset_type=="sharegpt":
-                prompts, prompt_lens, response_lens= sample_sharegpt_requests(args.dataset_path, args.random_prompt_count ,tokenizer, args.max_request_len)
+                prompts, prompt_lens, response_lens= sample_sharegpt_requests(args.dataset_path, args.random_prompt_count ,tokenizer, max_request_len)
             elif args.dataset_type=="burstgpt":
-                prompts, prompt_lens, response_lens= sample_burstgpt_request(args.dataset_path, args.random_prompt_count ,tokenizer, args.max_request_len)
+                prompts, prompt_lens, response_lens= sample_burstgpt_request(args.dataset_path, args.random_prompt_count ,tokenizer, max_request_len)
             elif args.dataset_type=="arxiv":
-                prompts, prompt_lens, response_lens= sample_arxiv_request(args.dataset_path, args.random_prompt_count ,tokenizer, args.max_request_len)
+                prompts, prompt_lens, response_lens= sample_arxiv_request(args.dataset_path, args.random_prompt_count ,tokenizer, max_request_len)
             num_prompts = len(prompts)
         elif args.gen_random_prompts:
             num_prompts = args.random_prompt_count
@@ -795,9 +866,9 @@ def main():
 
         for i, (prompt_len, gen_len) in enumerate(zip(prompt_lens, response_lens)):
             total = prompt_len + gen_len
-            if total > args.max_request_len:
+            if total > max_request_len:
                 print(f'truncating long prompt+gen_len {prompt_len=} {gen_len=}')
-                gen_len = args.max_request_len - prompt_len
+                gen_len = max_request_len - prompt_len
             response_lens[i] = gen_len
 
         if args.print_generation_lens_and_exit:
@@ -814,7 +885,7 @@ def main():
                 total_tokens.append(prompt_len + gen_len)
             print('total tokens', sorted(list(total_tokens)))
 
-        plot_len_cdf(prompt_lens, response_lens, total_tokens, args.log_filename)
+        plot_len_cdf(prompt_lens, response_lens, total_tokens, args.prompt_save_path)
 
         prompts = list(zip(prompts, prompt_lens, response_lens))
         # 保存 prompts 到文件
@@ -824,6 +895,9 @@ def main():
         # 从文件加载 prompts
         with open(prompt_path, 'rb') as f:
             prompts = pickle.load(f)
+    # warm up
+    warm_up(backend, tokenizer, prompts[:min(10, len(prompts))], args)
+
     throughput, \
     prefill_token_latencies, \
     decode_token_latencies, \
@@ -855,8 +929,9 @@ def main():
     current_time = datetime.datetime.now().strftime("%Y-%m-%d_%H:%M:%S")
     file_name = os.path.splitext(args.log_filename)[0] + "_latency_info.json"
     try:
-        with open(file_name, 'r') as f:
-            results = json.load(f)
+        # with open(file_name, 'r') as f:
+        #     results = json.load(f)
+        pass
     except json.decoder.JSONDecodeError:
         pass
     except FileNotFoundError:

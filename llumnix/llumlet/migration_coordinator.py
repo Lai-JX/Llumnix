@@ -95,7 +95,9 @@ class MigrationCoordinator:
             stage_count = 0
             while stage_count < self.migration_max_stages:
                 stage_count += 1
+                logger.info("[LJX] request {}, stage {}, timestamps: {}".format(migrate_out_request.request_id, stage_count, time.time()))
                 status = await self._migrate_out_onestage(migrate_in_ray_actor, migrate_out_request)
+                logger.info("[LJX] request {}, stage {} migration status: {}, timestamps: {}".format(migrate_out_request.request_id, stage_count, status, time.time()))
                 if MigrationStatus.is_finished(status):
                     return status
             # exceed max stages

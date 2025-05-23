@@ -44,6 +44,61 @@ class RequestTimestamps:
     api_server_get_queue_timestamp: float = 0.0
     api_server_generate_timestamp_end: float = 0.0
 
+    migrate_out_one_request_begin: float = 0.0
+    migrate_out_one_request_end: float = 0.0
+
+    migrated_add_running_request_start: float = 0.0
+    migrated_add_running_request_end: float = 0.0
+
+    def to_timestamp_dict(self) -> Dict[str, float]:
+        latency_dict = {
+            'api_server_generate_timestamp': self.api_server_generate_timestamp,
+            'manager_generate_timestamp': self.manager_generate_timestamp,
+            'llumlet_generate_timestamp': self.llumlet_generate_timestamp,
+            'engine_add_request_timestamp': self.engine_add_request_timestamp,
+            'engine_process_model_outputs_timestamp_begin': self.engine_process_model_outputs_timestamp_begin,
+            'engine_process_model_outputs_timestamp_end': self.engine_process_model_outputs_timestamp_end,
+            'engine_step_timestamp_begin': self.engine_step_timestamp_begin,
+            'engine_step_timestamp_end': self.engine_step_timestamp_end,
+            'engine_step_postprocess_timestamp_end': self.engine_step_postprocess_timestamp_end,
+            'engine_put_queue_timestamp': self.engine_put_queue_timestamp,
+            'engine_thread_put_queue_timestamp': self.engine_thread_put_queue_timestamp,
+            'engine_actor_put_queue_timestamp': self.engine_actor_put_queue_timestamp,
+            'queue_client_send_timestamp': self.queue_client_send_timestamp,
+            'queue_server_receive_timestamp': self.queue_server_receive_timestamp,
+            'api_server_get_queue_timestamp': self.api_server_get_queue_timestamp,
+            'api_server_generate_timestamp_end': self.api_server_generate_timestamp_end,
+            'migrated_add_running_request_start': self.migrated_add_running_request_start,
+            'migrated_add_running_request_end': self.migrated_add_running_request_end,
+            'migrate_out_one_request_begin': self.migrate_out_one_request_begin,
+            'migrate_out_one_request_end': self.migrate_out_one_request_end,
+
+            "across_manager_latency": (self.manager_generate_timestamp - self.api_server_generate_timestamp) * 1000,
+            "across_llumlet_latency": (self.llumlet_generate_timestamp - self.manager_generate_timestamp) * 1000,
+            "across_engine_latency": (self.engine_add_request_timestamp - self.llumlet_generate_timestamp) * 1000,
+            "process_model_outputs_latency":
+                (self.engine_process_model_outputs_timestamp_end - self.engine_process_model_outputs_timestamp_begin) * 1000,
+            "engine_step_latency":
+                (self.engine_step_timestamp_end - self.engine_step_timestamp_begin) * 1000,
+            "step_postprocess_latency":
+                (self.engine_step_postprocess_timestamp_end - self.engine_step_timestamp_end) * 1000,
+            "across_async_put_queue_thread_latency":
+                (self.engine_thread_put_queue_timestamp - self.engine_put_queue_timestamp) * 1000,
+            "across_async_put_queue_actor_latency":
+                (self.engine_actor_put_queue_timestamp - self.engine_thread_put_queue_timestamp) * 1000,
+            "across_queue_client_latency":
+                (self.queue_client_send_timestamp - self.engine_actor_put_queue_timestamp) * 1000,
+            "queue_rpc_latency":
+                (self.queue_server_receive_timestamp - self.queue_client_send_timestamp) * 1000,
+            "api_server_get_queue_latency":
+                (self.api_server_get_queue_timestamp - self.queue_server_receive_timestamp) * 1000,
+            "across_request_streams_latency":
+                (self.api_server_generate_timestamp_end - self.api_server_get_queue_timestamp) * 1000,
+            "migrate_out_one_request_latency":
+                (self.migrate_out_one_request_end - self.migrate_out_one_request_begin) * 1000,
+        }
+        return latency_dict
+    
     def to_latency_breakdown_dict(self) -> Dict[str, float]:
         latency_dict = {
             "across_manager_latency": (self.manager_generate_timestamp - self.api_server_generate_timestamp) * 1000,

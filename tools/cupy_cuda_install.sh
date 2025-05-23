@@ -13,11 +13,11 @@
 
 #!/bin/bash
 
-if ! command -v nvcc &> /dev/null
-then
-    echo "CUDA is not installed."
-    exit 1
-fi
+# if ! command -v nvcc &> /dev/null
+# then
+#     echo "CUDA is not installed."
+#     exit 1
+# fi
 
 CUDA_VERSION=$(nvcc --version | grep -oP 'V\d+\.\d+' | head -1 | tr -d 'V')
 

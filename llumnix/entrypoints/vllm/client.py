@@ -153,6 +153,11 @@ class LlumnixClientVLLM:
         current_completion_tokens = None
         if hasattr(request_output, "outputs") and len(request_output.outputs) > 0:
             current_completion_tokens = len(request_output.outputs[-1].token_ids)
+            # logger.debug(
+            #     "request[{}], outputs len:{}, outputs[-1].token_ids len:{} current completion tokens is {}".format(
+            #         request_id, len(request_output.outputs), len(request_output.outputs[-1].token_ids), current_completion_tokens
+            #     )
+            # )
 
         if not current_completion_tokens:
             # request_output has no outputs, return the request_output directly.

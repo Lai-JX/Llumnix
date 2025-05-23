@@ -16,6 +16,7 @@ from contextlib import asynccontextmanager
 import time
 import asyncio
 import json
+import numpy as np
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
@@ -113,6 +114,12 @@ async def generate(request: Request) -> Response:
     ret = {"text": text_outputs}
     return JSONResponse(ret)
 
+def ignore_migration_latency(per_token_latency):
+    if len(per_token_latency) < 3:
+        return
+    per_token_latency[1][1] = per_token_latency[2][1]
+
+
 @app.post("/generate_benchmark")
 async def generate_benchmark(request: Request) -> Response:
     """Generate completion for the request.
@@ -126,11 +133,12 @@ async def generate_benchmark(request: Request) -> Response:
     request_dict = await request.json()
     prompt = request_dict.pop("prompt")
     _ = request_dict.pop("stream", False)
-    sampling_params = SamplingParams(**request_dict)
+
     request_id = random_uuid()
-
+    logger.info("entrypoints receive request {}, prompt len:{}, output_max_len:{}".format(request_id, request_dict['prompt_len'], request_dict['max_tokens']))
+    del request_dict['prompt_len']
+    sampling_params = SamplingParams(**request_dict)
     start = time.time()
-
     results_generator = await llumnix_client.generate(prompt, sampling_params, request_id)
 
     # Non-streaming case
@@ -148,13 +156,16 @@ async def generate_benchmark(request: Request) -> Response:
         final_output = request_output
         set_timestamp(request_output, 'api_server_generate_timestamp_end', now)
         if hasattr(request_output, 'request_timestamps'):
-            per_token_latency_breakdown_list.append(request_output.request_timestamps.to_latency_breakdown_dict())
+            # per_token_latency_breakdown_list.append(request_output.request_timestamps.to_latency_breakdown_dict())
+            per_token_latency_breakdown_list.append(request_output.request_timestamps.to_timestamp_dict())
     assert final_output is not None
 
     if llumnix_client.log_requests:
         llumnix_client.num_finished_requests += 1
         logger.info("entrypoints finished request {}".format(request_id))
         logger.info("num_finished_requests {}".format(llumnix_client.num_finished_requests))
+        logger.info("per_token_latency:{}".format(np.array(per_token_latency)[:10,1]))
+    # ignore_migration_latency(per_token_latency)
 
     generation = final_output.outputs[0].text
     num_output_tokens = len(final_output.outputs[0].token_ids)
@@ -169,6 +180,7 @@ async def generate_benchmark(request: Request) -> Response:
         'num_output_tokens_cf': num_output_tokens,
         'per_token_latency': per_token_latency,
     }
+    logger.info(f"[LJX] per_token_latency_breakdown_list len {len(per_token_latency_breakdown_list)}")
     if per_token_latency_breakdown_list:
         ret['per_token_latency_breakdown_list'] = per_token_latency_breakdown_list
     return JSONResponse(ret)

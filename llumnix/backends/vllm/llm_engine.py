@@ -243,6 +243,9 @@ class LLMEngineLlumnix(_AsyncLLMEngine):
 
         set_timestamp(request_outputs, 'engine_step_timestamp_begin', self.step_begin_time)
         set_timestamp(request_outputs, 'engine_step_timestamp_end', time.time())
+        for request_output, server_info in zip(request_outputs, server_infos):
+            if server_info.request_timestamps.migrate_out_one_request_end == 0.0:
+                logger.info("[LJX] LLMEngineLlumnix._process_request_outputs engine_step_timestamp_end, {}, timestamps: {}".format(request_output.request_id, time.time()))
 
         for request_output in request_outputs:
             if request_output.finished:
@@ -393,6 +396,7 @@ class BackendVLLM(BackendInterface):
                     step_done_event.set()
                 await asyncio.sleep(0.0)
                 request_outputs, _ = await self.engine.step_async()
+                # logger.info("[LJX] step_async: {}, seq_id".format(time.time()))
                 if len(request_outputs) == 0:
                     await asyncio.sleep(NO_OUTPUTS_STEP_INTERVAL)
             # pylint: disable=broad-except
@@ -422,16 +426,19 @@ class BackendVLLM(BackendInterface):
 
         seq = backend_request.get_seqs()[0]
         seq.seq_id = next(self.engine.seq_counter)
-        logger.info("pop request {} from pre_alloc_cache_dict".format(backend_request.request_id))
+        logger.info("pop request {} from pre_alloc_cache_dict,{}".format(backend_request.request_id,time.time()))
         pre_alloc_blocks = self.engine.scheduler[0].pre_alloc_cache_dict.pop(backend_request.request_id)
         self.engine.scheduler[0].block_manager.add_block_table(pre_alloc_blocks, seq.seq_id)
         backend_request.reset_migration_args_dst()
+        logger.info("[LJX] request ({}) reset_migration_args_dst: {}".format(backend_request.request_id, time.time()))
         assert RequestStatus.is_migrating(backend_request.status), \
             "The status of request migrated to dst instance should be  \
              RequestStatus.WAITING_MIGRATING or RequestStatus.RUNNING_MIGRATING"
         if backend_request.status == RequestStatus.RUNNING_MIGRATING:
             backend_request.reset_status()
+            set_timestamp(backend_request, 'migrated_add_running_request_start', time.time())
             self.add_running_request(backend_request)
+            set_timestamp(backend_request, 'migrated_add_running_request_end', time.time())
         else: # WAITING_MIGRATING:
             self.add_waiting_request(backend_request)
 

@@ -46,6 +46,13 @@ generate_instance_combinations() {
 
 Llumnix_benchmark() {
     local count=$1
+    local prompt_len=$2
+    local response_len=$3
+    filename=$BASE_DIR/serve_$count\_tp$TP\_$REQ_NUM\_qps_$QPS\_prompt_len_$prompt_len\_response_len_$response_len.log
+    if [ -e $filename ]; then
+        echo "already test"
+        return
+    fi
     HEAD_NODE=1 python -m llumnix.entrypoints.vllm.api_server \
                     --host 127.0.0.1 \
                     --port 1234 \
@@ -56,7 +63,7 @@ Llumnix_benchmark() {
                     --migration-backend rayrpc \
                     --log-instance-info \
                     --tensor-parallel-size $TP \
-                    --log-filename $BASE_DIR/serve_$count\_tp$TP\_$REQ_NUM\_qps_$QPS > $BASE_DIR/serve_$count\_tp$TP\_$REQ_NUM\_qps_$QPS.log 2>&1 &
+                    --log-filename $BASE_DIR/serve_$count\_tp$TP\_$REQ_NUM\_qps_$QPS\_prompt_len_$prompt_len\_response_len_$response_len > $BASE_DIR/serve_$count\_tp$TP\_$REQ_NUM\_qps_$QPS\_prompt_len_$prompt_len\_response_len_$response_len.log 2>&1 &
     sleep 5
     # 启动实例
     count=$(($count - 1))
@@ -72,7 +79,7 @@ Llumnix_benchmark() {
                     --migration-backend rayrpc \
                     --log-instance-info \
                     --tensor-parallel-size $TP \
-                    --log-filename $BASE_DIR/serve_$((count + 1))\_tp$TP\_$REQ_NUM\_qps_$QPS > output2.log 2>&1 &
+                    --log-filename $BASE_DIR/serve_$((count + 1))\_tp$TP\_$REQ_NUM\_qps_$QPS\_prompt_len_$prompt_len\_response_len_$response_len > output2.log 2>&1 &
     done
 
     # 判断$HEAD_NODE_IP:1234是否可用 
@@ -93,14 +100,19 @@ Llumnix_benchmark() {
         --ip_ports $HEAD_NODE_IP:1234 \
         --tokenizer $MODEL_PATH \
         --random_prompt_count $REQ_NUM \
-        --dataset_type "sharegpt" \
-        --dataset_path /workspace/llm-serve/sharegpt_gpt4.jsonl \
+        --gen_random_prompts \
+        --random_prompt_lens_mean $prompt_len \
+        --random_prompt_lens_range 0 \
+        --variable_prompt_lens_distribution "uniform" \
+        --allow_variable_generation_length \
+        --variable_response_lens_mean $response_len \
+        --variable_response_lens_range 0 \
+        --variable_response_lens_distribution "uniform" \
         --distribution $DISTRIBUTION \
         --log_latencies \
         --fail_on_response_failure \
-        --max_request_len 2048 \
-        --log_filename $BASE_DIR/benchmark_$((count + 1))\_tp$TP\_$REQ_NUM\_qps_$QPS \
-        --prompt_save_path /workspace/llm-serve/Llumnix/logs/prompts/benchmark_$MODEL\_$DISTRIBUTION\_$REQ_NUM\_qps_$QPS \
+        --log_filename $BASE_DIR/benchmark_$((count + 1))\_tp$TP\_$REQ_NUM\_qps_$QPS\_prompt_len_$prompt_len\_response_len_$response_len \
+        --prompt_save_path /workspace/llm-serve/Llumnix/logs/prompts/benchmark_$MODEL\_$DISTRIBUTION\_$REQ_NUM\_qps_$QPS\_prompt_len_$prompt_len\_response_len_$response_len \
         --qps $QPS
 
     # 关闭服务
@@ -111,7 +123,13 @@ Llumnix_benchmark() {
 Llumnix_benchmark_pdd() {
     local prefill_count=$1
     local decode_count=$2
-    
+    local prompt_len=$3
+    local response_len=$4
+    filename=$BASE_DIR/serve_pdd_tp$TP\_$REQ_NUM\_qps_$QPS\_$prefill_count\_$decode_count\_prompt_len_$prompt_len\_response_len_$response_len.log
+    if [ -e $filename ]; then
+        echo "already test"
+        return
+    fi
     HEAD_NODE=1 python -m llumnix.entrypoints.vllm.api_server \
                 --host 127.0.0.1 \
                 --port 1234 \
@@ -124,7 +142,7 @@ Llumnix_benchmark_pdd() {
                 --enable-migration \
                 --log-instance-info \
                 --tensor-parallel-size $TP \
-                --log-filename $BASE_DIR/serve_pdd_tp$TP\_$REQ_NUM\_qps_$QPS\_$prefill_count\_$decode_count > $BASE_DIR/serve_pdd_tp$TP\_$REQ_NUM\_qps_$QPS\_$prefill_count\_$decode_count.log 2>&1 &
+                --log-filename $BASE_DIR/serve_pdd_tp$TP\_$REQ_NUM\_qps_$QPS\_$prefill_count\_$decode_count\_prompt_len_$prompt_len\_response_len_$response_len > $BASE_DIR/serve_pdd_tp$TP\_$REQ_NUM\_qps_$QPS\_$prefill_count\_$decode_count\_prompt_len_$prompt_len\_response_len_$response_len.log 2>&1 &
     sleep 5
     # 启动 prefill 实例
     prefill_count=$(($prefill_count - 1))
@@ -142,7 +160,7 @@ Llumnix_benchmark_pdd() {
                     --enable-migration \
                     --log-instance-info \
                     --tensor-parallel-size $TP \
-                    --log-filename $BASE_DIR/serve_pdd_tp$TP\_$REQ_NUM\_qps_$QPS\_$((prefill_count + 1))\_$decode_count > output1.log 2>&1 &
+                    --log-filename $BASE_DIR/serve_pdd_tp$TP\_$REQ_NUM\_qps_$QPS\_$((prefill_count + 1))\_$decode_count\_prompt_len_$prompt_len\_response_len_$response_len > output1.log 2>&1 &
     done
 
     # 启动 decode 实例
@@ -161,7 +179,7 @@ Llumnix_benchmark_pdd() {
                     --enable-migration \
                     --log-instance-info \
                     --tensor-parallel-size $TP \
-                    --log-filename $BASE_DIR/serve_pdd_tp$TP\_$REQ_NUM\_qps_$QPS\_$((prefill_count + 1))\_$decode_count > output2.log 2>&1 &
+                    --log-filename $BASE_DIR/serve_pdd_tp$TP\_$REQ_NUM\_qps_$QPS\_$((prefill_count + 1))\_$decode_count\_prompt_len_$prompt_len\_response_len_$response_len > output2.log 2>&1 &
     done
 
     # 判断$HEAD_NODE_IP:1234是否可用 
@@ -182,14 +200,19 @@ Llumnix_benchmark_pdd() {
         --ip_ports $HEAD_NODE_IP:1234 \
         --tokenizer $MODEL_PATH \
         --random_prompt_count $REQ_NUM \
-        --dataset_type "sharegpt" \
-        --dataset_path /workspace/llm-serve/sharegpt_gpt4.jsonl \
+        --gen_random_prompts \
+        --random_prompt_lens_mean $prompt_len \
+        --random_prompt_lens_range 0 \
+        --variable_prompt_lens_distribution "uniform" \
+        --allow_variable_generation_length \
+        --variable_response_lens_mean $response_len \
+        --variable_response_lens_range 0 \
+        --variable_response_lens_distribution "uniform" \
         --distribution $DISTRIBUTION \
         --log_latencies \
         --fail_on_response_failure \
-        --max_request_len 2048 \
-        --log_filename $BASE_DIR/benchmark_pdd_tp$TP\_$REQ_NUM\_qps_$QPS\_$((prefill_count + 1))\_$decode_count \
-        --prompt_save_path /workspace/llm-serve/Llumnix/logs/prompts/benchmark_$MODEL\_$DISTRIBUTION\_$REQ_NUM\_qps_$QPS \
+        --log_filename $BASE_DIR/benchmark_pdd_tp$TP\_$REQ_NUM\_qps_$QPS\_prompt_len_$prompt_len\_response_len_$response_len\_$((prefill_count + 1))\_$decode_count \
+        --prompt_save_path /workspace/llm-serve/Llumnix/logs/prompts/benchmark_$MODEL\_$DISTRIBUTION\_$REQ_NUM\_qps_$QPS\_prompt_len_$prompt_len\_response_len_$response_len \
         --qps $QPS
 
     # 关闭服务
@@ -200,28 +223,37 @@ Llumnix_benchmark_pdd() {
 for sm_clock in "${sm_clocks[@]}"; do
     for mem_clock in "${mem_clocks[@]}"; do
         echo "clock : $sm_clock  $mem_clock"    # 暂时没用
+        for prompt_len in 2 4 8 16 32 64 128 256 512 1024 1536 1664 1728 1760 1776 1784 1788 1790; do
+            for response_len in 2 4 8 16 32 64 128 256 512 1024 1536 1664 1728 1760 1776 1784 1788 1790; do
+                echo "prompt_len : $prompt_len response_len : $response_len"
+                # 判断prompt_len+response_len是否大于2048
+                if [ $((prompt_len + response_len)) -gt 2048 ]; then
+                    echo "prompt_len + response_len > 2048"
+                    continue
+                fi
+                Llumnix_benchmark $TOTAL_INSTANCES $prompt_len $response_len
+                # 获取所有可能的实例组合
+                combinations=$(generate_instance_combinations $TOTAL_INSTANCES)
+                # combinations=('(1,3)')
+                echo $combinations
+                for combo in $combinations; do
+                    echo $combo
+                    # 使用 tr 命令删除括号，然后用 awk 提取两个数字
+                    prefill_count=$(echo $combo | tr -d '()' | awk -F, '{print $1}')
+                    decode_count=$(echo $combo | tr -d '()' | awk -F, '{print $2}')
+                
+                    echo "prefill_count : $prefill_count decode_count : $decode_count"
+                    Llumnix_benchmark_pdd $prefill_count $decode_count $prompt_len $response_len
+                done
 
-        Llumnix_benchmark $TOTAL_INSTANCES
-
-        # 获取所有可能的实例组合
-        combinations=$(generate_instance_combinations $TOTAL_INSTANCES)
-        # combinations=('(1,3)')
-        echo $combinations
-        for combo in $combinations; do
-            echo $combo
-            # 使用 tr 命令删除括号，然后用 awk 提取两个数字
-            prefill_count=$(echo $combo | tr -d '()' | awk -F, '{print $1}')
-            decode_count=$(echo $combo | tr -d '()' | awk -F, '{print $2}')
-        
-            
-
-            Llumnix_benchmark_pdd $prefill_count $decode_count
+                nvidia-smi -acp 1
+                nvidia-smi -rac
+                nvidia-smi -rgc
+                nvidia-smi -rmc
+            done
         done
 
-        nvidia-smi -acp 1
-        nvidia-smi -rac
-        nvidia-smi -rgc
-        nvidia-smi -rmc
+        
     done
 done
 

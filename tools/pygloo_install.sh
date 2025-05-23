@@ -31,6 +31,6 @@ pygloo_install() {
 }
 
 echo "Starting pygloo installation..."
-check_bazel
+# check_bazel
 pygloo_install
 echo "pygloo installation completed successfully."
