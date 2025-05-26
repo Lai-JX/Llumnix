@@ -159,6 +159,7 @@ class MigrationCoordinator:
                     self.backend_engine.add_running_request(migrate_out_request)
                     self.backend_engine.pop_migrating_out_request_last_stage(migrate_out_request)
                 return MigrationStatus.ABORTED_DST
+            logger.info("[LJX] request {}, len(src_blocks) {}".format(migrate_out_request.request_id, len(src_blocks)))
 
             if migrate_out_request.should_abort_migration():
                 return MigrationStatus.ABORTED_SRC

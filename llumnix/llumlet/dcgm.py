@@ -66,6 +66,13 @@ class DCGMMonitor:
             logger.info("[INFO] starting nv-hostengine ...")
             try:
                 subprocess.run(
+                    ["nv-hostengine", "-t"],
+                    capture_output=True,
+                    text=True,
+                    # check=True,
+                    timeout=10
+                )
+                subprocess.run(
                     ["nv-hostengine"],
                     capture_output=True,
                     text=True,

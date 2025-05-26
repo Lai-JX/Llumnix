@@ -479,6 +479,7 @@ class Manager:
             dead_instances = set()
             for instance_name, ret in zip(alive_instances, rets):
                 if isinstance(ret, ray.exceptions.RayActorError):
+                    logger.info("Instance {} is dead. {}".format(instance_name, str(ret)))
                     dead_instances.add(instance_name)
             if len(dead_instances) > 0:
                 await self.scale_down(dead_instances, rebuild_migration_backend=False)
@@ -494,8 +495,9 @@ class Manager:
             dead_instances = set()
             group_name = random_uuid()
             instance_rank = {instance_id: index for index, instance_id in enumerate(alive_instances)}
+            instance_rank_tp_size = {index: ray.get(self.instances[instance_id].get_world_size.remote()) for index, instance_id in enumerate(alive_instances)}
             dead_instances.update(await run_task(alive_instances, "rebuild_migration_backend",
-                                                                  instance_rank, group_name))
+                                                                  instance_rank, group_name, instance_rank_tp_size))
             if len(dead_instances) == 0 and self.pending_rebuild_migration_instances == pending_task:
                 dead_instances.update(await run_task(alive_instances, "warmup"))
             if len(dead_instances) == 0:
@@ -513,8 +515,8 @@ class Manager:
             src_filter=lambda instance_info: instance_info.instance_id in alive_instances,
             dst_filter=lambda instance_info: instance_info.instance_id in alive_instances)
 
-        logger.info("Rebuild migration backend done, group_name: {}, alive instance ({}): {}."
-            .format(group_name, len(alive_instances), alive_instances))
+        logger.info("Rebuild migration backend done, group_name: {}, alive instance ({}): {}, instance_rank_tp_size: {}."
+            .format(group_name, len(alive_instances), alive_instances, instance_rank_tp_size))
 
         # Restore migrate config
         self.enable_migration = origin_config

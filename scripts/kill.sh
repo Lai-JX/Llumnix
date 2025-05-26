@@ -10,7 +10,8 @@ kill_all()
         echo "killed $id"  
     done
 }
-
+kill_all "RayWorkerWrapper.execute_method"
+sleep 1
 kill_all "llumnix"
 # 恢复设置
 nvidia-smi -acp 1

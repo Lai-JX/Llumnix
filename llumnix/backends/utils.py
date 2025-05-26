@@ -111,3 +111,23 @@ def get_engine_world_size(engine_args, backend_type: BackendType):
     else: # BLADE_LLM
         world_size = engine_args.world_size
     return world_size
+
+@ray.remote
+class BarrierActor:
+    def __init__(self, parties):
+        self.parties = parties
+        self.count = 0
+        self.waiters = []
+
+    async def arrive(self):
+        import asyncio
+        fut = asyncio.get_event_loop().create_future()
+        self.count += 1
+        self.waiters.append(fut)
+        if self.count == self.parties:
+            # 所有进程都到达，唤醒所有等待者
+            for waiter in self.waiters:
+                waiter.set_result(True)
+            self.count = 0
+            self.waiters = []
+        await fut

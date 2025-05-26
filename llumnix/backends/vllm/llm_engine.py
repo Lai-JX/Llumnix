@@ -447,7 +447,7 @@ class BackendVLLM(BackendInterface):
                           src_blocks: List[int],
                           dst_blocks: List[int],
                           request_id: str,
-                          is_last_stage: bool) -> None:
+                          is_last_stage: bool) -> None:     # dst_ray_actor: Llumlet ActorHandle
         await dst_ray_actor.execute_engine_method_async.remote("_run_workers_async",
                                                                "migrate_cache",
                                                                src_worker_handle_list=self.worker_handle_list,

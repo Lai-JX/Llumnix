@@ -299,3 +299,6 @@ class Llumlet:
     async def execute_engine_method_async(self, method, *args, **kwargs):
         executor = getattr(self.backend_engine, method)
         return await executor(*args, **kwargs)
+    
+    def get_world_size(self):
+        return self.backend_engine.engine.parallel_config.world_size

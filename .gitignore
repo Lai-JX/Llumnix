@@ -186,4 +186,9 @@ _build/
 *.hip
 *_hip*
 
-logs
+logs/l40*
+logs/a6000*
+logs/prompts
+logs/analysis/result
+logs/analysis/*.png
+scripts/*.log

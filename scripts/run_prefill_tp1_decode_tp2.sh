@@ -1,13 +1,14 @@
 #!/bin/bash
 export HEAD_NODE_IP='127.0.0.1'
+export RAY_DEDUP_LOGS=0 
 
 # prefill 1*tp1,
 # decode 1*tp2,
 
 
-REQ_NUM=10
+REQ_NUM=1000
 TOTAL_INSTANCES=$3
-MODEL='llama-2-7b'
+MODEL='llama-2-13b'
 DISTRIBUTION='uniform'     # "burst", "uniform", "poisson", "gamma"
 QPS=${6:-4}
 MIGRATION_BACKEND='gloo'        # rayrpc gloo nccl
@@ -31,12 +32,12 @@ echo "模型路径: $MODEL_PATH"
 BASE_DIR='/workspace/llm-serve/Llumnix/logs/l40-pdd--test'/$MODEL/$DISTRIBUTION/$MIGRATION_BACKEND
 mkdir -p $BASE_DIR
 
-nvidia-smi -pl 300
+# nvidia-smi -pl 300
 nvidia-smi -pm ENABLED
 nvidia-smi -acp 0
-
+# rm -r /root/.cache/bazel/_bazel_root/
 # 启动prefill实例
-HEAD_NODE=1 python -m llumnix.entrypoints.vllm.api_server \
+HEAD_NODE=1 python -u -m llumnix.entrypoints.vllm.api_server \
             --host 127.0.0.1 \
             --port 1234 \
             --initial-instances 1 \
@@ -51,9 +52,9 @@ HEAD_NODE=1 python -m llumnix.entrypoints.vllm.api_server \
             --tensor-parallel-size $prefill_tp \
             --max-num-seqs $REQ_NUM \
             --log-filename $BASE_DIR/serve_pdd_tp$prefill_tp\_$REQ_NUM\_qps_$QPS\_$prefill_count\_$decode_count\_prompt_len_$prompt_len\_response_len_$response_len > $BASE_DIR/serve_pdd_tp$prefill_tp\_$REQ_NUM\_qps_$QPS\_$prefill_count\_$decode_count\_prompt_len_$prompt_len\_response_len_$response_len.log 2>&1 &
-
+sleep 10
 # 启动decode实例
-python -m llumnix.entrypoints.vllm.api_server \
+python -u -m llumnix.entrypoints.vllm.api_server \
             --host 127.0.0.1 \
             --port 1235 \
             --initial-instances 1 \
@@ -68,6 +69,15 @@ python -m llumnix.entrypoints.vllm.api_server \
             --max-num-seqs $REQ_NUM \
             --log-filename $BASE_DIR/serve_pdd_tp$decode_tp\_$REQ_NUM\_qps_$QPS\_$((prefill_count + 1))\_$decode_count\_prompt_len_$prompt_len\_response_len_$response_len > output2.log 2>&1 &
 
+# HEAD_NODE=1 python -m llumnix.entrypoints.vllm.api_server \
+#                 --host 127.0.0.1 \
+#                 --port 1234 \
+#                 --initial-instances 1 \
+#                 --launch-ray-cluster \
+#                 --tensor-parallel-size 4 \
+#                 --model $MODEL_PATH \
+#                 --worker-use-ray \
+#                 --migration-backend gloo \
 # 判断$HEAD_NODE_IP:1234是否可用 
 INTERVAL=2
 while true; do
@@ -100,3 +110,7 @@ python /workspace/llm-serve/Llumnix/benchmark/benchmark_serving.py \
     --log_filename $BASE_DIR/benchmark_pdd_tp$prefill_tp\_$REQ_NUM\_qps_$QPS\_prompt_len_$prompt_len\_response_len_$response_len\_$((prefill_count + 1))\_$decode_count \
     --prompt_save_path /workspace/llm-serve/Llumnix/logs/prompts/benchmark_$MODEL\_$DISTRIBUTION\_$REQ_NUM\_qps_$QPS\_prompt_len_$prompt_len\_response_len_$response_len \
     --qps $QPS
+nvidia-smi -acp 1
+nvidia-smi -rac 
+nvidia-smi -rgc 
+nvidia-smi -rmc

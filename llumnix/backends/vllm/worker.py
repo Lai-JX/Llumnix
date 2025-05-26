@@ -130,11 +130,23 @@ class MigrationWorker(Worker):
                       dst_blocks: List[int],
                       request_id: str,
                       is_last_stage: bool = False) -> None:
-        src_worker_handle = src_worker_handle_list[self.rank]
+        # src_worker_handle = src_worker_handle_list[self.rank]
+
+        # do not consider pipeline parallelism
+        src_world_size = len(src_worker_handle_list)
+        dst_world_size = self.parallel_config.world_size
+
+        logger.info("src_world_size: {}, dst_world_size: {}, self.rank: {}, chunk_rank:{}".format(src_world_size, dst_world_size, self.rank, self.rank // (dst_world_size // src_world_size)))
+        
+        if dst_world_size % src_world_size == 0:
+            chunk_size = dst_world_size // src_world_size
+            src_worker_handle = src_worker_handle_list[self.rank // chunk_size]
+            chunk_rank = self.rank % chunk_size
+            logger.info("chunk_size: {}, chunk_rank: {}, self.rank:{} id handle:{}".format(chunk_size, self.rank % chunk_size, self.rank, id(src_worker_handle)))
 
         start_time = time.time()
         try:
-            self.migration_backend.migrate_cache(src_worker_handle, src_blocks, dst_blocks, request_id, is_last_stage)
+            self.migration_backend.migrate_cache(src_worker_handle, src_blocks, dst_blocks, request_id, is_last_stage,chunk_size=chunk_size, chunk_rank=chunk_rank)
         except ray.exceptions.RayActorError:
             logger.info("rank: {}, src_worker_handle {} is dead".format(self.rank, src_worker_handle))
         # pylint: disable=broad-except
@@ -209,14 +221,25 @@ class MigrationWorker(Worker):
                         if new_seq_id != old_seq_id:
                             seq_group_metadata.seq_data[new_seq_id] = seq_group_metadata.seq_data.pop(old_seq_id)
 
-    def rebuild_migration_backend(self, instance_rank: Dict[str, int], group_name: str) -> bool:
+    def rebuild_migration_backend(self, instance_rank: Dict[str, int], group_name: str, instance_rank_tp_size=None) -> bool:
         self.migration_backend.destory_backend()
-
+        logger.info("Rebuild migration backend[{}][{}], instance_rank: {}, group_name: {}, instance_rank_tp_size: {}".format(self.rank, self.instance_id, instance_rank, group_name, instance_rank_tp_size))
         ret = True
         if group_name is not None:
-            num_instance = len(instance_rank)
-            self.global_world_size = num_instance * self.parallel_config.world_size
-            self.global_rank = self.rank + instance_rank[self.instance_id] * self.parallel_config.world_size
+            if instance_rank_tp_size is not None:
+                cur_instance_rank = instance_rank[self.instance_id]
+                global_size = 0
+                for rank, tp_size in instance_rank_tp_size.items():
+                    if rank == cur_instance_rank:
+                        self.global_rank = global_size + self.rank
+                    global_size += tp_size
+                self.global_world_size = global_size
+                logger.info("global_world_size: {}, global_rank: {}".format(self.global_world_size, self.global_rank))
+            else:
+                num_instance = len(instance_rank)
+                self.global_world_size = num_instance * self.parallel_config.world_size
+                self.global_rank = self.rank + instance_rank[self.instance_id] * self.parallel_config.world_size
+                logger.info("global_world_size: {}, global_rank: {}".format(self.global_world_size, self.global_rank))
             ret = self.migration_backend.init_backend(group_name, self.global_world_size, self.global_rank)
 
         return ret
@@ -228,3 +251,6 @@ class MigrationWorker(Worker):
         torch.cuda.synchronize()
         torch.cuda.empty_cache()
         torch.cuda.reset_max_memory_allocated()
+
+    # async def execute_worker_method_async(self, method, *args, **kwargs):
+    #     return await make_async(self.execute_method)(method, *args, **kwargs)
