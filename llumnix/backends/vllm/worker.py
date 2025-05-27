@@ -142,7 +142,7 @@ class MigrationWorker(Worker):
             chunk_size = dst_world_size // src_world_size
             src_worker_handle = src_worker_handle_list[self.rank // chunk_size]
             chunk_rank = self.rank % chunk_size
-            logger.info("chunk_size: {}, chunk_rank: {}, self.rank:{} id handle:{}".format(chunk_size, self.rank % chunk_size, self.rank, id(src_worker_handle)))
+            logger.info("chunk_size: {}, chunk_rank: {}, self.rank:{}".format(chunk_size, self.rank % chunk_size, self.rank))
 
         start_time = time.time()
         try:
