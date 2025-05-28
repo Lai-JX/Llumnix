@@ -131,22 +131,31 @@ class MigrationWorker(Worker):
                       request_id: str,
                       is_last_stage: bool = False) -> None:
         # src_worker_handle = src_worker_handle_list[self.rank]
+        # has not consider pipeline parallelism
 
-        # do not consider pipeline parallelism
         src_world_size = len(src_worker_handle_list)
         dst_world_size = self.parallel_config.world_size
 
-        logger.info("src_world_size: {}, dst_world_size: {}, self.rank: {}, chunk_rank:{}".format(src_world_size, dst_world_size, self.rank, self.rank // (dst_world_size // src_world_size)))
+        logger.info("src_world_size: {}, dst_world_size: {}, self.rank: {}".format(src_world_size, dst_world_size, self.rank,))
+        assert dst_world_size % src_world_size == 0 or src_world_size % dst_world_size == 0, "dst_world_size % \src_world_size == 0 or src_world_size % \dst_world_size == 0"
+        add_tp = dst_world_size % src_world_size == 0
         
-        if dst_world_size % src_world_size == 0:
+        if add_tp:
             chunk_size = dst_world_size // src_world_size
             src_worker_handle = src_worker_handle_list[self.rank // chunk_size]
             chunk_rank = self.rank % chunk_size
             logger.info("chunk_size: {}, chunk_rank: {}, self.rank:{}".format(chunk_size, self.rank % chunk_size, self.rank))
+        else:
+            chunk_size = src_world_size // dst_world_size
+            src_worker_handle = src_worker_handle_list[self.rank * chunk_size : (self.rank + 1) * chunk_size]
+            logger.info("chunk_size: {}, self.rank:{}".format(chunk_size, self.rank))
 
         start_time = time.time()
         try:
-            self.migration_backend.migrate_cache(src_worker_handle, src_blocks, dst_blocks, request_id, is_last_stage,chunk_size=chunk_size, chunk_rank=chunk_rank)
+            if add_tp:
+                self.migration_backend.migrate_cache(src_worker_handle, src_blocks, dst_blocks, request_id, is_last_stage,chunk_size=chunk_size, chunk_rank=chunk_rank)
+            else:
+                self.migration_backend.migrate_cache_subtract_tp(src_worker_handle, src_blocks, dst_blocks, request_id, is_last_stage,chunk_size=chunk_size)
         except ray.exceptions.RayActorError:
             logger.info("rank: {}, src_worker_handle {} is dead".format(self.rank, src_worker_handle))
         # pylint: disable=broad-except

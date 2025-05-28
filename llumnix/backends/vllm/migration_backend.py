@@ -11,6 +11,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import threading
 import time
 from typing import List, Tuple, Optional, Callable
@@ -29,11 +30,12 @@ from llumnix.backends.migration_backend_interface import MigrationBackendBase
 from llumnix.logging.logger import init_logger
 from llumnix.constants import NUMPY_SUPPORTED_DTYPES_FOR_MIGRATION
 from llumnix.utils import random_uuid
+import numpy as np
 
 logger = init_logger(__name__)
 
 
-@ray.remote(num_cpus=0, max_concurrency=2)
+@ray.remote(num_cpus=0, max_concurrency=8)
 class ProxyActor:
     def __init__(self, is_driver_worker: bool, use_ray_spmd_worker: bool):
         self.is_driver_worker = is_driver_worker
@@ -42,11 +44,17 @@ class ProxyActor:
     def exec_method(self, handle, from_driver_worker, *args, **kwargs):
 
         @func_set_timeout(10)  # 10秒超时
-        def _exec_method(self, handle, from_driver_worker=False, *args, **kwargs):
-            if from_driver_worker or (self.is_driver_worker and not self.use_ray_spmd_worker):
-                ret = ray.get(handle.execute_engine_method_async.remote("execute_worker_method_async", *args, **kwargs))
+        def _exec_method(self, handle, from_driver_worker=None, *args, **kwargs):
+            if from_driver_worker is not None:
+                if from_driver_worker:
+                    ret = ray.get(handle.execute_engine_method_async.remote("execute_worker_method_async", *args, **kwargs))
+                else:
+                    ret = ray.get(handle.execute_method.options(concurrency_group="migate").remote(*args, **kwargs))
             else:
-                ret = ray.get(handle.execute_method.options(concurrency_group="migate").remote(*args, **kwargs))
+                if self.is_driver_worker and not self.use_ray_spmd_worker:
+                    ret = ray.get(handle.execute_engine_method_async.remote("execute_worker_method_async", *args, **kwargs))
+                else:
+                    ret = ray.get(handle.execute_method.options(concurrency_group="migate").remote(*args, **kwargs))
             return ret
         
         try:
@@ -167,13 +175,65 @@ class RayRpcMigrationBackend(MigrationBackendBase):
                 rpc_numpy_cache, src_seq_group_metadata = ray.get(ray_obj)
             else:
                 rpc_numpy_cache = ray.get(ray_obj)
-        
 
         self.do_recv(rpc_numpy_cache, recv_blocks)
         if src_seq_group_metadata:
             self.worker_stage_seq_group_metadata_callback(request_id, src_seq_group_metadata)
         # ray.get(self.barrier_actor.arrive.remote())
 
+    def migrate_cache_subtract_tp(self,
+                      src_handle: List["ray.actor.ActorHandle"],
+                      src_blocks: List[int],
+                      dst_blocks: List[int],
+                      request_id: str,
+                      is_last_stage: bool,
+                      chunk_size: int=1) -> None:
+        tot_blocks = len(src_blocks)
+        rpc_numpy_cache = None
+        src_seq_group_metadata = None
+        logger.info("migrate_cache  worker_rank:{}, tot_blocks: {}, chunk_size: {}"
+                    .format(self.worker_rank, tot_blocks, chunk_size))
+
+        for start_idx in range(0, tot_blocks, self.num_migration_buffer_blocks):
+            offset = min(self.num_migration_buffer_blocks, tot_blocks - start_idx)
+            is_last_comm = (tot_blocks - start_idx <= self.num_migration_buffer_blocks)
+            send_blocks = src_blocks[start_idx:start_idx+offset]
+            send_worker_metadata = self.use_ray_spmd_worker and is_last_stage and is_last_comm
+            tasks = []
+            for idx, handle in enumerate(src_handle):
+                from_driver_worker = (idx == 0 and self.worker_rank == 0)
+                tasks.append(
+                    self.actor.exec_method.remote(handle, from_driver_worker, "do_send",
+                    None, send_blocks, request_id=request_id, send_worker_metadata=send_worker_metadata)
+                )
+            ray_objs = ray.get(tasks)
+
+            
+            if rpc_numpy_cache is not None:
+                self.do_recv(rpc_numpy_cache, recv_blocks)
+            recv_blocks = dst_blocks[start_idx:start_idx+offset]
+
+            if send_worker_metadata:
+                rpc_numpy_cache, src_seq_group_metadata = ray_objs[:,0], ray_objs[:,1]
+            else:
+                rpc_numpy_cache = ray_objs
+            logger.info("migrate_cache_subtract_tp, chunk_size: {}, start_idx: {}, offset: {}, rpc_numpy_cache shape: {}"
+                        .format(chunk_size, start_idx, offset, rpc_numpy_cache[0].shape))
+            ss_time = time.time()
+            for i in range(len(rpc_numpy_cache)):
+                rpc_numpy_cache[i] = rpc_numpy_cache[i].reshape(
+                    self.num_layers, 2, len(send_blocks),
+                    self.cache_engine[0].block_size,
+                    self.cache_engine[0].num_kv_heads // chunk_size,
+                    self.cache_engine[0].head_size
+                )
+            rpc_numpy_cache = np.concatenate(rpc_numpy_cache, axis=4)
+            rpc_numpy_cache = rpc_numpy_cache.reshape( self.num_layers, 2, len(send_blocks), self.migration_cache_size)
+            logger.info("migrate_cache_subtract_tp, concatenate and reshape cost: {}"
+                        .format(time.time()-ss_time))
+        self.do_recv(rpc_numpy_cache, recv_blocks)
+        if src_seq_group_metadata:
+            self.worker_stage_seq_group_metadata_callback(request_id, src_seq_group_metadata)
 
     def do_send(self, dst_handle: "ray.actor.ActorHandle", blocks: List[int], virtuel_engine: int=0, chunk_size=1, chunk_rank=0):
         num_blocks = len(blocks)
@@ -402,6 +462,46 @@ class RayColMigrationBackend(MigrationBackendBase):
         if src_seq_group_metadata:
             self.worker_stage_seq_group_metadata_callback(request_id, src_seq_group_metadata)
 
+    def migrate_cache_subtract_tp(self,
+                      src_handle: List["ray.actor.ActorHandle"],
+                      src_blocks: List[int],
+                      dst_blocks: List[int],
+                      request_id: str,
+                      is_last_stage: bool,
+                      chunk_size: int=1) -> None:
+        tot_blocks = len(src_blocks)
+        from_driver_worker = (self.worker_rank // chunk_size) == 0
+        tasks = []
+        for idx, handle in enumerate(src_handle):
+            from_driver_worker = (idx == 0 and self.worker_rank == 0)
+            tasks.append(
+                self.actor.exec_method.remote(handle, from_driver_worker, "get_global_rank")
+            )
+        src_ranks = ray.get(tasks)
+
+        src_seq_group_metadata = None
+        for start_idx in range(0, tot_blocks, self.num_migration_buffer_blocks):
+            offset = min(self.num_migration_buffer_blocks, tot_blocks - start_idx)
+            is_last_comm = (tot_blocks - start_idx <= self.num_migration_buffer_blocks)
+            send_blocks = src_blocks[start_idx:start_idx+offset]
+            recv_blocks = dst_blocks[start_idx:start_idx+offset]
+            send_worker_metadata = self.use_ray_spmd_worker and is_last_stage and is_last_comm
+            tasks = []
+            for idx, handle in enumerate(src_handle):
+                from_driver_worker = (idx == 0 and self.worker_rank == 0)
+                tasks.append(
+                    self.actor.exec_method.remote(handle, from_driver_worker, "do_send",
+                    self.global_rank, send_blocks, request_id=request_id, send_worker_metadata=send_worker_metadata)
+                )
+            
+
+            self.do_recv(src_ranks, recv_blocks, 0, chunk_size)
+            if send_worker_metadata:
+                ray_objs = ray.get(tasks)
+                _, src_seq_group_metadata = ray_objs[:,0], ray_objs[:,1]
+        if src_seq_group_metadata:
+            self.worker_stage_seq_group_metadata_callback(request_id, src_seq_group_metadata)
+
     def do_send(self, dst_handle: "ray.actor.ActorHandle", blocks: List[int], virtuel_engine: int=0, chunk_size=1, chunk_rank=0):
         import cupy
         num_blocks = len(blocks)
@@ -467,8 +567,15 @@ class RayColMigrationBackend(MigrationBackendBase):
         # logger.info("do_send finished: {} -> {}, chunk_rank: {}"
         #             .format(self.global_rank, dst_handle, chunk_rank,))
 
-    def do_recv(self, src_handle: "ray.actor.ActorHandle", blocks: List[int], virtuel_engine: int=0):
-        # time.sleep(1)
+    def do_recv(self, src_handle: "ray.actor.ActorHandle", blocks: List[int], virtuel_engine: int=0, chunk_size=1):
+        def recv_worker(idx, group_rank):
+            col.recv(self.send_cache_split[idx], group_rank, self.group_name)
+            self.send_cache_split[idx] = self.send_cache_split[idx].reshape(
+                                self.migration_num_layers, 2, num_blocks,
+                                self.cache_engine[0].block_size,
+                                self.cache_engine[0].num_kv_heads // chunk_size,
+                                self.cache_engine[0].head_size)
+
         num_blocks = len(blocks)
         src_to_dst: List[Tuple[int, int]] = []
         for idx in range(num_blocks):
@@ -486,7 +593,21 @@ class RayColMigrationBackend(MigrationBackendBase):
                 if cache_idx == 0:
                     # logger.info("do_recv: {} -> {},  layer_idx: {}"
                     #             .format(src_handle, self.global_rank, layer_idx))
-                    col.recv(recv_cache, src_handle, self.group_name)
+                    if isinstance(src_handle, list):
+                        self.send_cache_split = list(torch.chunk(recv_cache, chunk_size, dim=3))
+                        threads = []
+                        for idx, group_rank in enumerate(src_handle):
+                            t = threading.Thread(target=recv_worker, args=(idx, group_rank))
+                            t.start()
+                            threads.append(t)
+                        for t in threads:
+                            t.join()
+                        # 将收到的张量按照num_kv_heads进行拼接
+                        cache_tmp = torch.cat(self.send_cache_split, dim=4)
+                        cache_tmp = cache_tmp.view(self.migration_num_layers, 2, num_blocks, self.migration_cache_size)
+                        recv_cache = cache_tmp
+                    else:
+                        col.recv(recv_cache, src_handle, self.group_name)
                     # logger.info("do_recv finished: {} -> {},  layer_idx: {}"
                     #             .format(src_handle, self.global_rank, layer_idx))
                 self.cache_engine[virtuel_engine].attn_backend \

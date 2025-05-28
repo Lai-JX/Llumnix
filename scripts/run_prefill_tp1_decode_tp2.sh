@@ -6,15 +6,15 @@ export RAY_DEDUP_LOGS=0
 # decode 1*tp2,
 
 
-REQ_NUM=2000
+REQ_NUM=20
 TOTAL_INSTANCES=$3
 MODEL='llama-2-7b'
 DISTRIBUTION='uniform'     # "burst", "uniform", "poisson", "gamma"
 QPS=${6:-4}
-MIGRATION_BACKEND='rayrpc'        # rayrpc gloo nccl
+MIGRATION_BACKEND='gloo'        # rayrpc gloo nccl
 MODEL_PATH="/share/models/llama-2-7b"
 prefill_tp=2
-decode_tp=4
+decode_tp=2
 prefill_count=1
 decode_count=1
 prompt_len=256
@@ -92,24 +92,24 @@ while true; do
 done
 
 # 添加负载
-python /workspace/llm-serve/Llumnix/benchmark/benchmark_serving.py \
-    --ip_ports $HEAD_NODE_IP:1234 \
-    --tokenizer $MODEL_PATH \
-    --random_prompt_count $REQ_NUM \
-    --gen_random_prompts \
-    --random_prompt_lens_mean $prompt_len \
-    --random_prompt_lens_range 0 \
-    --variable_prompt_lens_distribution "uniform" \
-    --allow_variable_generation_length \
-    --variable_response_lens_mean $response_len \
-    --variable_response_lens_range 0 \
-    --variable_response_lens_distribution "uniform" \
-    --distribution $DISTRIBUTION \
-    --log_latencies \
-    --fail_on_response_failure \
-    --log_filename $BASE_DIR/benchmark_pdd_tp$prefill_tp\_n$prefill_count\_tp$decode_tp\_n$decode_count\_$REQ_NUM\_qps_$QPS\_prompt_len_$prompt_len\_response_len_$response_len \
-    --prompt_save_path /workspace/llm-serve/Llumnix/logs/prompts/benchmark_$MODEL\_$DISTRIBUTION\_$REQ_NUM\_qps_$QPS\_prompt_len_$prompt_len\_response_len_$response_len \
-    --qps $QPS
+# python /workspace/llm-serve/Llumnix/benchmark/benchmark_serving.py \
+#     --ip_ports $HEAD_NODE_IP:1234 \
+#     --tokenizer $MODEL_PATH \
+#     --random_prompt_count $REQ_NUM \
+#     --gen_random_prompts \
+#     --random_prompt_lens_mean $prompt_len \
+#     --random_prompt_lens_range 0 \
+#     --variable_prompt_lens_distribution "uniform" \
+#     --allow_variable_generation_length \
+#     --variable_response_lens_mean $response_len \
+#     --variable_response_lens_range 0 \
+#     --variable_response_lens_distribution "uniform" \
+#     --distribution $DISTRIBUTION \
+#     --log_latencies \
+#     --fail_on_response_failure \
+#     --log_filename $BASE_DIR/benchmark_pdd_tp$prefill_tp\_n$prefill_count\_tp$decode_tp\_n$decode_count\_$REQ_NUM\_qps_$QPS\_prompt_len_$prompt_len\_response_len_$response_len \
+#     --prompt_save_path /workspace/llm-serve/Llumnix/logs/prompts/benchmark_$MODEL\_$DISTRIBUTION\_$REQ_NUM\_qps_$QPS\_prompt_len_$prompt_len\_response_len_$response_len \
+#     --qps $QPS
 python /workspace/llm-serve/Llumnix/benchmark/benchmark_serving.py \
     --ip_ports $HEAD_NODE_IP:1234 \
     --tokenizer $MODEL_PATH \
@@ -120,6 +120,7 @@ python /workspace/llm-serve/Llumnix/benchmark/benchmark_serving.py \
     --log_latencies \
     --fail_on_response_failure \
     --log_filename $BASE_DIR/benchmark_pdd_sharegpt_tp$prefill_tp\_n$prefill_count\_tp$decode_tp\_n$decode_count\_$REQ_NUM\_qps_$QPS \
+    --prompt_save_path /workspace/llm-serve/Llumnix/logs/prompts/benchmark_$MODEL\_$DISTRIBUTION\_$REQ_NUM\_qps_$QPS\_sharegpt \
     --max_request_len 2048 \
     --qps $QPS
 

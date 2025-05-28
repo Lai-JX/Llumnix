@@ -37,6 +37,17 @@ class MigrationBackendBase(ABC):
                       chunk_size: int=1,
                       chunk_rank: int=0) -> None:
         raise NotImplementedError
+    
+    @abstractmethod
+    def migrate_cache_subtract_tp(self,
+                      src_handle: List["ray.actor.ActorHandle"],
+                      src_blocks: List[int],
+                      dst_blocks: List[int],
+                      request_id: str,
+                      is_last_stage: bool,
+                      chunk_size: int=1,
+                      chunk_rank: int=0) -> None:
+        raise NotImplementedError
 
     @abstractmethod
     def do_send(self, dst_handle: "ray.actor.ActorHandle", blocks: List[int], virtuel_engine: int,  chunk_size: int=1, chunk_rank: int=0):
