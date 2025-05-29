@@ -11,6 +11,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import threading
 from typing import Dict, List
 import asyncio
 import time
@@ -131,3 +132,23 @@ class BarrierActor:
             self.count = 0
             self.waiters = []
         await fut
+
+class Barrier:
+    def __init__(self, parties):
+        self.parties = parties
+        self.count = 0
+        self.wait_for_event = threading.Event()
+        self.count_lock = threading.Lock()
+
+    def arrive(self):
+        with self.count_lock:
+            # 增加到达计数
+            self.count += 1
+        if self.count == self.parties:
+            # 所有进程都到达，唤醒所有等待者
+            self.wait_for_event.set()
+            self.count = 0
+        else:
+            # 等待其他进程到达
+            self.wait_for_event.wait()
+            

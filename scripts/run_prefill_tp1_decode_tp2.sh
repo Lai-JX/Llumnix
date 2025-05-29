@@ -11,10 +11,10 @@ TOTAL_INSTANCES=$3
 MODEL='llama-2-7b'
 DISTRIBUTION='uniform'     # "burst", "uniform", "poisson", "gamma"
 QPS=${6:-4}
-MIGRATION_BACKEND='gloo'        # rayrpc gloo nccl
+MIGRATION_BACKEND='rayrpc'        # rayrpc gloo nccl
 MODEL_PATH="/share/models/llama-2-7b"
 prefill_tp=2
-decode_tp=2
+decode_tp=1
 prefill_count=1
 decode_count=1
 prompt_len=256
@@ -51,6 +51,7 @@ HEAD_NODE=1 python -u -m llumnix.entrypoints.vllm.api_server \
             --log-request-timestamps \
             --tensor-parallel-size $prefill_tp \
             --max-num-seqs $REQ_NUM \
+            --migration-num-layers 32 \
             --log-filename $BASE_DIR/serve_pdd_tp$prefill_tp\_n$prefill_count\_tp$decode_tp\_n$decode_count\_$REQ_NUM\_qps_$QPS\_prompt_len_$prompt_len\_response_len_$response_len > $BASE_DIR/serve_pdd_tp$prefill_tp\_n$prefill_count\_tp$decode_tp\_n$decode_count\_$REQ_NUM\_qps_$QPS\_prompt_len_$prompt_len\_response_len_$response_len.log 2>&1 &
 sleep 10
 # 启动decode实例
@@ -67,6 +68,7 @@ python -u -m llumnix.entrypoints.vllm.api_server \
             --log-request-timestamps \
             --tensor-parallel-size $decode_tp \
             --max-num-seqs $REQ_NUM \
+            --migration-num-layers 32 \
             --log-filename $BASE_DIR/serve_pdd_tp$prefill_tp\_n$prefill_count\_tp$decode_tp\_n$decode_count\_$REQ_NUM\_qps_$QPS\_prompt_len_$prompt_len\_response_len_$response_len > output2.log 2>&1 &
 
 # HEAD_NODE=1 python -m llumnix.entrypoints.vllm.api_server \
@@ -92,37 +94,37 @@ while true; do
 done
 
 # 添加负载
-# python /workspace/llm-serve/Llumnix/benchmark/benchmark_serving.py \
-#     --ip_ports $HEAD_NODE_IP:1234 \
-#     --tokenizer $MODEL_PATH \
-#     --random_prompt_count $REQ_NUM \
-#     --gen_random_prompts \
-#     --random_prompt_lens_mean $prompt_len \
-#     --random_prompt_lens_range 0 \
-#     --variable_prompt_lens_distribution "uniform" \
-#     --allow_variable_generation_length \
-#     --variable_response_lens_mean $response_len \
-#     --variable_response_lens_range 0 \
-#     --variable_response_lens_distribution "uniform" \
-#     --distribution $DISTRIBUTION \
-#     --log_latencies \
-#     --fail_on_response_failure \
-#     --log_filename $BASE_DIR/benchmark_pdd_tp$prefill_tp\_n$prefill_count\_tp$decode_tp\_n$decode_count\_$REQ_NUM\_qps_$QPS\_prompt_len_$prompt_len\_response_len_$response_len \
-#     --prompt_save_path /workspace/llm-serve/Llumnix/logs/prompts/benchmark_$MODEL\_$DISTRIBUTION\_$REQ_NUM\_qps_$QPS\_prompt_len_$prompt_len\_response_len_$response_len \
-#     --qps $QPS
 python /workspace/llm-serve/Llumnix/benchmark/benchmark_serving.py \
     --ip_ports $HEAD_NODE_IP:1234 \
     --tokenizer $MODEL_PATH \
     --random_prompt_count $REQ_NUM \
-    --dataset_type "sharegpt" \
-    --dataset_path /workspace/llm-serve/sharegpt_gpt4.jsonl \
-    --distribution "poisson" \
+    --gen_random_prompts \
+    --random_prompt_lens_mean $prompt_len \
+    --random_prompt_lens_range 0 \
+    --variable_prompt_lens_distribution "uniform" \
+    --allow_variable_generation_length \
+    --variable_response_lens_mean $response_len \
+    --variable_response_lens_range 0 \
+    --variable_response_lens_distribution "uniform" \
+    --distribution $DISTRIBUTION \
     --log_latencies \
     --fail_on_response_failure \
-    --log_filename $BASE_DIR/benchmark_pdd_sharegpt_tp$prefill_tp\_n$prefill_count\_tp$decode_tp\_n$decode_count\_$REQ_NUM\_qps_$QPS \
-    --prompt_save_path /workspace/llm-serve/Llumnix/logs/prompts/benchmark_$MODEL\_$DISTRIBUTION\_$REQ_NUM\_qps_$QPS\_sharegpt \
-    --max_request_len 2048 \
+    --log_filename $BASE_DIR/benchmark_pdd_tp$prefill_tp\_n$prefill_count\_tp$decode_tp\_n$decode_count\_$REQ_NUM\_qps_$QPS\_prompt_len_$prompt_len\_response_len_$response_len \
+    --prompt_save_path /workspace/llm-serve/Llumnix/logs/prompts/benchmark_$MODEL\_$DISTRIBUTION\_$REQ_NUM\_qps_$QPS\_prompt_len_$prompt_len\_response_len_$response_len \
     --qps $QPS
+# python /workspace/llm-serve/Llumnix/benchmark/benchmark_serving.py \
+#     --ip_ports $HEAD_NODE_IP:1234 \
+#     --tokenizer $MODEL_PATH \
+#     --random_prompt_count $REQ_NUM \
+#     --dataset_type "sharegpt" \
+#     --dataset_path /workspace/llm-serve/sharegpt_gpt4.jsonl \
+#     --distribution "poisson" \
+#     --log_latencies \
+#     --fail_on_response_failure \
+#     --log_filename $BASE_DIR/benchmark_pdd_sharegpt_tp$prefill_tp\_n$prefill_count\_tp$decode_tp\_n$decode_count\_$REQ_NUM\_qps_$QPS \
+#     --prompt_save_path /workspace/llm-serve/Llumnix/logs/prompts/benchmark_$MODEL\_$DISTRIBUTION\_$REQ_NUM\_qps_$QPS\_sharegpt \
+#     --max_request_len 2048 \
+#     --qps $QPS
 
 sleep 5
 ./kill.sh

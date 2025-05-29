@@ -237,9 +237,12 @@ class RayRpcMigrationBackend(MigrationBackendBase):
 
     def do_send(self, dst_handle: "ray.actor.ActorHandle", blocks: List[int], virtuel_engine: int=0, chunk_size=1, chunk_rank=0):
         num_blocks = len(blocks)
-
+        ss = time.time()
         if chunk_rank == 0:
-            self.barrier_actor = BarrierActor.options().remote(chunk_size)
+            ss = time.time()
+            if chunk_size > 1:
+                # self.barrier_actor = BarrierActor.options().remote(chunk_size)
+                self.barrier = threading.Barrier(chunk_size)
             send_cache = self.dummy_cache[:num_blocks].view(self.num_layers, 2, num_blocks, self.migration_cache_size)
             # src_to_dst = {block_num: idx for idx, block_num in enumerate(blocks)}
             src_to_dst: List[Tuple[int, int]] = []
@@ -248,13 +251,16 @@ class RayRpcMigrationBackend(MigrationBackendBase):
             block_mapping_tensor = torch.tensor(src_to_dst,
                                             dtype=torch.int64,
                                             device="cpu", pin_memory=True).view(-1, 2)
-        # with cupy.cuda.Device(self.local_rank):
+            logger.info(f"time[do_send][{chunk_rank}] before swap_blocks : {time.time()-ss}")
         if chunk_rank == 0:
             with torch.cuda.stream(self.migration_stream):
                 for layer_idx in range(self.num_layers):
                     self.cache_engine[virtuel_engine].attn_backend \
                         .swap_blocks(self.gpu_cache[virtuel_engine][layer_idx], send_cache[layer_idx], block_mapping_tensor)
             torch.cuda.Stream.synchronize(self.migration_stream)
+            if chunk_size == 1:
+                return send_cache.to(self.rpc_dtype).numpy()
+            logger.info(f"time[do_send][{chunk_rank}] after swap_blocks : {time.time()-ss}")
             # logger.info("shape before split: {}".format(send_cache.shape))
             send_cache = send_cache.view(
                 self.num_layers, 2, num_blocks,
@@ -262,20 +268,26 @@ class RayRpcMigrationBackend(MigrationBackendBase):
                 self.cache_engine[0].num_kv_heads,
                 self.cache_engine[0].head_size
             )
+            logger.info(f"time[do_send][{chunk_rank}] after view : {time.time()-ss}")
             # 按照num_kv_heads所在维度进行划分
             self.send_cache_split = list(torch.chunk(send_cache, chunk_size, dim=4))
+            logger.info(f"time[do_send][{chunk_rank}] after split : {time.time()-ss}")
             # logger.info("shape after split: {} + {}; {}".format(self.send_cache_split[0].shape,self.send_cache_split[1].shape,self.migration_cache_size // chunk_size))
             if chunk_size > 1:
                 self.wait_for_split_event.set()
         else:
             # 等待划分完成
             self.wait_for_split_event.wait()
+        logger.info(f"time[do_send][{chunk_rank}] split finished and all process begin : {time.time()-ss}")
         
         # logger.info("shape after split[{}]: {} + {}; {}".format(chunk_rank,self.send_cache_split[0].shape,self.send_cache_split[1].shape,self.migration_cache_size // chunk_size))
         self.send_cache_split[chunk_rank] = self.send_cache_split[chunk_rank].reshape(
             self.num_layers, 2, num_blocks, self.migration_cache_size // chunk_size
         )
-        ray.get(self.barrier_actor.arrive.remote())
+        logger.info(f"time[do_send][{chunk_rank}] process reshape : {time.time()-ss}")
+        # ray.get(self.barrier_actor.arrive.remote())
+        self.barrier.wait()
+        logger.info(f"time[do_send][{chunk_rank}] after barrier_actor : {time.time()-ss}")
         if chunk_rank == 0 and chunk_size > 1:
             self.wait_for_split_event.clear()
         return self.send_cache_split[chunk_rank].to(self.rpc_dtype).numpy()
@@ -472,13 +484,14 @@ class RayColMigrationBackend(MigrationBackendBase):
         tot_blocks = len(src_blocks)
         from_driver_worker = (self.worker_rank // chunk_size) == 0
         tasks = []
+        ss = time.time()
         for idx, handle in enumerate(src_handle):
             from_driver_worker = (idx == 0 and self.worker_rank == 0)
             tasks.append(
                 self.actor.exec_method.remote(handle, from_driver_worker, "get_global_rank")
             )
         src_ranks = ray.get(tasks)
-
+        logger.info(f"time[do_send] after src_ranks : {time.time()-ss}")
         src_seq_group_metadata = None
         for start_idx in range(0, tot_blocks, self.num_migration_buffer_blocks):
             offset = min(self.num_migration_buffer_blocks, tot_blocks - start_idx)
@@ -494,8 +507,9 @@ class RayColMigrationBackend(MigrationBackendBase):
                     self.global_rank, send_blocks, request_id=request_id, send_worker_metadata=send_worker_metadata)
                 )
             
-
+            logger.info(f"time[do_send] before do_recv : {time.time()-ss}")
             self.do_recv(src_ranks, recv_blocks, 0, chunk_size)
+            logger.info(f"time[do_send] after do_recv : {time.time()-ss}")
             if send_worker_metadata:
                 ray_objs = ray.get(tasks)
                 _, src_seq_group_metadata = ray_objs[:,0], ray_objs[:,1]
@@ -508,8 +522,9 @@ class RayColMigrationBackend(MigrationBackendBase):
         # logger.info("do_send: {} -> {}, chunk_rank: {}, worker_rank:{}, local_rank:{}, num_blocks: {}"
         #             .format(self.global_rank, dst_handle, chunk_rank, self.worker_rank, self.local_rank,num_blocks))
         if chunk_rank == 0:
-            self.barrier_actor = BarrierActor.options().remote(chunk_size)
-            
+            # self.barrier_actor = BarrierActor.options().remote(chunk_size)
+            if chunk_size > 1:
+                self.barrier = threading.Barrier(chunk_size)
             send_cache = self.dummy_cache[:num_blocks].view(self.migration_num_layers, 2, num_blocks, self.migration_cache_size)
             src_to_dst: List[Tuple[int, int]] = []
             for idx in range(num_blocks):
@@ -526,41 +541,45 @@ class RayColMigrationBackend(MigrationBackendBase):
                             .swap_blocks(self.gpu_cache[virtuel_engine][layer_idx], send_cache[cache_idx], block_mapping_tensor)
                         
                     if cache_idx + 1 == self.migration_num_layers or layer_idx + 1 == self.cache_engine[0].num_attention_layers:
+                        if chunk_size == 1:
+                            col.send(send_cache, dst_handle, self.group_name)
                         # logger.info("do_send: {} -> {}, layer_idx: {}, chunk_rank: {}"
                                     # .format(self.global_rank, dst_handle, layer_idx, chunk_rank,))
-                        ss_time = time.time()
-                        if chunk_rank == 0:
-                            # logger.info("shape before split: {}".format(send_cache.shape))
-                            send_cache = send_cache.view(
-                                self.migration_num_layers, 2, num_blocks,
-                                self.cache_engine[0].block_size,
-                                self.cache_engine[0].num_kv_heads,
-                                self.cache_engine[0].head_size
-                            )
-                            # 按照num_kv_heads所在维度进行划分
-                            self.send_cache_split = list(torch.chunk(send_cache, chunk_size, dim=4))
-                            # logger.info("shape after split: {} + {}; {}".format(self.send_cache_split[0].shape,self.send_cache_split[1].shape,self.migration_cache_size // chunk_size))
-                            if chunk_size > 1:
-                                self.wait_for_split_event.set()
                         else:
-                            # 等待划分完成
-                            self.wait_for_split_event.wait()
-                        
-                        # logger.info("shape after split[{}]: {} + {}; {}".format(chunk_rank,self.send_cache_split[0].shape,self.send_cache_split[1].shape,self.migration_cache_size // chunk_size))
-                        self.send_cache_split[chunk_rank] = self.send_cache_split[chunk_rank].reshape(
-                            self.migration_num_layers, 2, num_blocks, self.migration_cache_size // chunk_size
-                        )
-                        
-                        # TODO(KuilongCui): check the error code if peer is dead
-                        col.send(self.send_cache_split[chunk_rank], dst_handle, self.group_name)
-                        # logger.info("do_send finished: {} -> {}, layer_idx: {}, chunk_rank: {}, cost: {}"
-                                    # .format(self.global_rank, dst_handle, layer_idx, chunk_rank, time.time()-ss_time))
-                        # 等待各个进程都传输完成
-                        ray.get(self.barrier_actor.arrive.remote())
-                        if chunk_size > 1 and chunk_rank == 0:
-                            self.wait_for_split_event.clear()
-                        # logger.info("do_send all finished: {} -> {}, layer_idx: {}, chunk_rank: {}, cost: {}"
-                        #             .format(self.global_rank, dst_handle, layer_idx, chunk_rank, time.time()-ss_time))
+                            ss_time = time.time()
+                            if chunk_rank == 0:
+                                # logger.info("shape before split: {}".format(send_cache.shape))
+                                send_cache = send_cache.view(
+                                    self.migration_num_layers, 2, num_blocks,
+                                    self.cache_engine[0].block_size,
+                                    self.cache_engine[0].num_kv_heads,
+                                    self.cache_engine[0].head_size
+                                )
+                                # 按照num_kv_heads所在维度进行划分
+                                self.send_cache_split = list(torch.chunk(send_cache, chunk_size, dim=4))
+                                # logger.info("shape after split: {} + {}; {}".format(self.send_cache_split[0].shape,self.send_cache_split[1].shape,self.migration_cache_size // chunk_size))
+                                if chunk_size > 1:
+                                    self.wait_for_split_event.set()
+                            else:
+                                # 等待划分完成
+                                self.wait_for_split_event.wait()
+                            
+                            # logger.info("shape after split[{}]: {} + {}; {}".format(chunk_rank,self.send_cache_split[0].shape,self.send_cache_split[1].shape,self.migration_cache_size // chunk_size))
+                            self.send_cache_split[chunk_rank] = self.send_cache_split[chunk_rank].reshape(
+                                self.migration_num_layers, 2, num_blocks, self.migration_cache_size // chunk_size
+                            )
+                            
+                            # TODO(KuilongCui): check the error code if peer is dead
+                            col.send(self.send_cache_split[chunk_rank], dst_handle, self.group_name)
+                            # logger.info("do_send finished: {} -> {}, layer_idx: {}, chunk_rank: {}, cost: {}"
+                                        # .format(self.global_rank, dst_handle, layer_idx, chunk_rank, time.time()-ss_time))
+                            # 等待各个进程都传输完成
+                            # ray.get(self.barrier_actor.arrive.remote())
+                            self.barrier.wait()
+                            if chunk_size > 1 and chunk_rank == 0:
+                                self.wait_for_split_event.clear()
+                            # logger.info("do_send all finished: {} -> {}, layer_idx: {}, chunk_rank: {}, cost: {}"
+                            #             .format(self.global_rank, dst_handle, layer_idx, chunk_rank, time.time()-ss_time))
                         
                 
             self.migration_stream.synchronize()
@@ -593,19 +612,27 @@ class RayColMigrationBackend(MigrationBackendBase):
                 if cache_idx == 0:
                     # logger.info("do_recv: {} -> {},  layer_idx: {}"
                     #             .format(src_handle, self.global_rank, layer_idx))
+                    ss = time.time()
+                    logger.info(f"self.cache_engine[0].num_attention_layers: {self.cache_engine[0].num_attention_layers},{self.migration_num_layers}")
+                    logger.info(f"time[do_send] after do_recv : {time.time()-ss}")
                     if isinstance(src_handle, list):
                         self.send_cache_split = list(torch.chunk(recv_cache, chunk_size, dim=3))
                         threads = []
+                        logger.info(f"time[do_send] before recv_worker : {time.time()-ss}")
                         for idx, group_rank in enumerate(src_handle):
                             t = threading.Thread(target=recv_worker, args=(idx, group_rank))
                             t.start()
                             threads.append(t)
                         for t in threads:
                             t.join()
+                        logger.info(f"time[do_send] after recv_worker : {time.time()-ss}")
                         # 将收到的张量按照num_kv_heads进行拼接
                         cache_tmp = torch.cat(self.send_cache_split, dim=4)
+                        logger.info(f"time[do_send] after cat : {time.time()-ss}")
                         cache_tmp = cache_tmp.view(self.migration_num_layers, 2, num_blocks, self.migration_cache_size)
+                        logger.info(f"time[do_send] after view : {time.time()-ss}")
                         recv_cache = cache_tmp
+                        logger.info(f"time[do_send] after copy to  recv_cache: {time.time()-ss}")
                     else:
                         col.recv(recv_cache, src_handle, self.group_name)
                     # logger.info("do_recv finished: {} -> {},  layer_idx: {}"
