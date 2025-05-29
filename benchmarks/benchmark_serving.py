@@ -18,6 +18,8 @@ On the client side, run:
 import argparse
 import asyncio
 import json
+import os
+import pickle
 import random
 import time
 from typing import AsyncGenerator, List, Tuple, Dict
@@ -220,7 +222,15 @@ def main(args: argparse.Namespace):
 
     api_url = f"http://{args.host}:{args.port}/generate"
     tokenizer = get_tokenizer(args.tokenizer, trust_remote_code=args.trust_remote_code)
-    input_requests = sample_requests(args.dataset, args.num_prompts, tokenizer)
+    prompt_path = f'{args.prompt_save_path}_prompt.pkl'
+    print(prompt_path)
+    if not os.path.exists(prompt_path):
+        input_requests = sample_requests(args.dataset, args.num_prompts, tokenizer)
+        with open(prompt_path, 'wb') as f:
+            pickle.dump(input_requests, f)
+    else:
+        with open(prompt_path, 'rb') as f:
+            input_requests = pickle.load(f)
 
     benchmark_start_time = time.time()
     asyncio.run(benchmark(args.backend, api_url, input_requests, args.best_of,
@@ -271,5 +281,6 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument('--trust-remote-code', action='store_true',
                         help='trust remote code from huggingface')
+    parser.add_argument('--prompt_save_path', type=str, default='/workspace/llm-serve/Llumnix/logs/l40')
     args = parser.parse_args()
     main(args)
