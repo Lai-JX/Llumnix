@@ -12,6 +12,7 @@ from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.instance_info import InstanceInfo
+from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 logger = init_logger(__name__)
 
@@ -74,15 +75,35 @@ class AsyncLLMEngine:
         self.async_engine_actor = async_engine_actor
         # self.progress_callback = progress_callback
         self.log_requests = log_requests
+
+        # let the engine run on the same node as the worker
+        worker = kwargs.get("workers")[0]
+        worker_node_id = ray.get(worker.get_node_id.remote())
+
         if not self.engine_use_ray:
             engine_class = LLMEngine
         elif self.worker_use_ray:
             if self.async_engine_actor:
-                engine_class = ray.remote(num_cpus=0, name=self.instance_name, max_concurrency=2)(AsyncActorLLMEngine).remote
+                engine_class = ray.remote(num_cpus=0, name=self.instance_name, max_concurrency=2)(AsyncActorLLMEngine
+                ).options(
+                    scheduling_strategy=NodeAffinitySchedulingStrategy(
+                        node_id=worker_node_id, soft=False
+                    )
+                ).remote
             else:
-                engine_class = ray.remote(num_cpus=0, name=self.instance_name)(LLMEngine).remote
+                engine_class = ray.remote(num_cpus=0, name=self.instance_name)(LLMEngine
+                ).options(
+                    scheduling_strategy=NodeAffinitySchedulingStrategy(
+                        node_id=worker_node_id, soft=False
+                    )
+                ).remote
         else:
-            engine_class = ray.remote(num_gpus=1, name=self.instance_name)(LLMEngine).remote
+            engine_class = ray.remote(num_gpus=1, name=self.instance_name)(LLMEngine
+                ).options(
+                    scheduling_strategy=NodeAffinitySchedulingStrategy(
+                        node_id=worker_node_id, soft=False
+                    )
+                ).remote
         self.engine = engine_class(instance_id, *args, **kwargs)
         # Request id -> request output.
         self.request_outputs: Dict[str, RequestOutput] = {}

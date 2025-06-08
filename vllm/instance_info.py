@@ -1,3 +1,4 @@
+from typing import List
 import numpy as np
 
 from vllm.logger import init_logger
@@ -75,6 +76,22 @@ class InstanceInfo:
         self.instance_load = -np.inf
         self.instance_load_original = -np.inf
         self.instance_load_dispatch = -np.inf
+
+        # gpu metrics
+        self.sm_clock: List[float] = None  # GPU clock     use float to align with other metrics
+        self.mem_clock: List[float] = None  # Memory clock   use float to align with other metrics
+        self.gr_engine_active: List[float] = None
+        self.sm_active: List[float] = None
+        self.sm_occupancy: List[float] = None
+        self.tensor_active: List[float] = None
+        self.dram_active: List[float] = None
+        self.fp32_active: List[float] = None
+        self.fp16_active: List[float] = None
+        self.pcie_tx_bytes: List[float] = None
+        self.pcie_rx_bytes: List[float] = None
+        self.nvlink_tx_bytes: List[float] = None
+        self.nvlink_rx_bytes: List[float] = None
+        self.power: List[float] = None
 
 class InstanceLoadInfo:
     def __init__(self, instance_info: InstanceInfo = None):

@@ -5,8 +5,9 @@
 # 4: imean, 5: omean
 # 6: dispatch_strategy, 7: enable_migrate, 8: enable_defrag, 9: migrate_threshold
 # 10: log_dirname
+# 11: model
 
-source $1 $2 $3 $4 $5 $6 $7 $8 $9 ${10} ${11}
+source $1 $2 $3 $4 $5 $6 $7 $8 $9 ${10} ${11} ${12}
 script_args=("$@")
 
 # Run real test

@@ -1,4 +1,6 @@
 import asyncio
+import os
+from statistics import mean
 import time
 import csv
 from functools import partial
@@ -8,6 +10,7 @@ from collections import defaultdict
 from vllm.config import ParallelConfig, RequestSchedulerConfig
 from vllm.engine.arg_utils import EngineManagerArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine, EngineRequestInput
+from vllm.engine.dcgm import GPU_FIELDS_MAP
 from vllm.engine.ray_utils import initialize_cluster, ray, RayWorker
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
@@ -391,6 +394,7 @@ class LLMEngineManager:
         instance_id = instance_info.instance_id
         step_id = instance_info.step_id
         instance_info = await self.request_scheduler.update_instance_info.remote(instance_info)
+        self._update_gpu_mertics(instance_info)
         if self.record_instance_info:
                 self._record_instance_info_to_csv(instance_info)
         # self.request_scheduler.update_instance_info(instance_info)
@@ -423,7 +427,24 @@ class LLMEngineManager:
             if scale_down_num and not self.scaling_down and self.num_instance - scale_down_num >= self.min_replicas:
                 asyncio.create_task(self._scale_down())
                 # task.add_done_callback(scaling_done_callback)
-
+    
+    def _update_gpu_mertics(self, instance_info: Optional[InstanceInfo] = None) -> None:
+        # engine = self.instances[instance_info.instance_id].engine if instance_info else None
+        # gpu_monitor = ray.get(engine.get_gpu_monitor.remote())
+        # gpu_monitor = self.instances[instance_info.instance_id].engine.gpuMonitor if instance_info else None
+        if instance_info:
+            # Get the GPU metrics from the GPU monitor.
+            engine = self.instances[instance_info.instance_id].engine if instance_info else None
+            gpu_metrics = ray.get(engine.get_gpu_metrics.remote())
+            # gpu_metrics = gpu_monitor.get_gpu_metrics()
+            for gpu_metric, mstric_values in gpu_metrics.items():
+                mstric_value_mean_all = []
+                for device_id, metric_value in mstric_values.items():
+                    if len(metric_value) > 0:
+                        mstric_value_mean_all.append(mean(metric_value))
+                if hasattr(instance_info, GPU_FIELDS_MAP[gpu_metric]):
+                    setattr(instance_info, GPU_FIELDS_MAP[gpu_metric], mstric_value_mean_all)
+                    # logger.info(f"gpu metric {GPU_FIELDS_MAP[gpu_metric]}: {getattr(instance_info, GPU_FIELDS_MAP[gpu_metric])}")
     async def _terminate_scaling_down(self):
         logger.info(f"terminate scale down")
         scale_down_instance_id = self.num_instance - 1
@@ -520,9 +541,10 @@ class LLMEngineManager:
                     placement_group_capture_child_tasks=True),
             )(RayWorker).remote()
             self.workers.append(worker)
-
+        
         # Initialize torch distributed process group for the workers.
-        init_torch_dist_process_group(self.workers, backend= None if self.parallel_config.migrate_backend=="gloo" else "nccl")
+        print(None if self.parallel_config.migrate_backend=="gloo" else "nccl")
+        init_torch_dist_process_group(self.workers, backend= "gloo")
         self._run_workers("init_worker",
                           get_all_outputs=True,
                           worker_init_fn=lambda: Worker(
@@ -665,7 +687,7 @@ class LLMEngineManager:
             'num_block_first_waiting_request',
             'num_block_all_waiting_request',
             'waiting_time_first_waiting_request',
-            'num_priority_request',])
+            'num_priority_request',]+list(GPU_FIELDS_MAP.values()))
     
     def _init_req_info_csv(self, engine_args) -> None:
         self.req_info_file = open(engine_args.results_filename+f'_req.csv','w')
@@ -699,7 +721,8 @@ class LLMEngineManager:
             instance_info.num_block_first_waiting_request,
             instance_info.num_block_all_waiting_request,
             instance_info.waiting_time_first_waiting_request,
-            instance_info.num_priority_request,])
+            instance_info.num_priority_request,] + 
+            [getattr(instance_info, gpu_field) for gpu_field in GPU_FIELDS_MAP.values()])
         self.instance_info_file.flush()
 
     def _record_req_info_to_csv(self, request_output: RequestOutput) -> None:

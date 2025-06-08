@@ -5,7 +5,7 @@
 # 6: dispatch_strategy, 7: enable_migrate, 8: enable_defrag, 9: migrate_threshold
 # 10: log_dirname
 
-instance_parallel_size=16
+instance_parallel_size=2
 max_batch_total_tokens_vals=("12000")
 export PORT=1032
 

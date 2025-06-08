@@ -34,6 +34,8 @@ need_migrate_frequency=4
 migrate_threshold=$9
 
 log_dirname=${10}
+MODEL=${11:-"llama-7b"}
+log_dirname=$MODEL"/"$log_dirname
 
 log_path="qps${qps}_prompts${num_prompts}_${query_distribution}_cv${coefficient_variation}_imean${imean}_omean${omean}_${dispatch_strategy}_migrate${enable_migrate}_defrag${enable_defrag}"
 if [ -n $log_dirname ]; then

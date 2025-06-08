@@ -5,8 +5,9 @@
 # 4: dataset_type, 5: dataset_path
 # 6: dispatch_strategy, 7: enable_migrate, 8: enable_defrag, 9: migrate_threshold
 # 10: log_dirname
+# 11: model
 
-source $1 $2 $3 $4 $5 $6 $7 $8 $9 ${10} ${11}
+source $1 $2 $3 $4 $5 $6 $7 $8 $9 ${10} ${11} ${12}
 script_args=("$@")
 
 # Run real test
@@ -15,9 +16,19 @@ if [ ! -d "./log/"$log_path ]; then
     mkdir -p "./log/"$log_path
 fi
 
+if [ "$MODEL" == "llama-2-7b" ]; then
+    MODEL_PATH="/share/models/llama-2-7b"
+elif [ "$MODEL" == "llama-2-13b" ]; then
+    MODEL_PATH="/share/models/llama-2-13b"
+elif [ "$MODEL" == "llama-7b" ]; then
+    MODEL_PATH="/share/models/llama/llama-7b"
+elif [ "$MODEL" == "llama-13b" ]; then
+    MODEL_PATH="/share/models/llama/llama-13b"
+fi
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 config=$1
 config_filepath=$(readlink -f "$config")
-
+echo $MODEL_PATH
 function start_model_server_migrate {
     local max_num_batched_tokens=$1
     declare -g output_filename="./log/"$log_path"/"enable_migrate_$(date '+%Y-%m-%d_%H:%M:%S').log
@@ -30,15 +41,14 @@ function start_model_server_migrate {
 
     echo "enable migrate"
 
-    ulimit -n 65536 && RAY_DEDUP_LOGS=0 && CUDA_VISIBLE_DEVICES=0,1,2,3 \
+    ulimit -n 65536 && RAY_DEDUP_LOGS=0 && CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES \
     python -m vllm.entrypoints.api_server \
         --port $PORT \
-        --model /mnt/data/models/huggingface-models/llama-trained/llama-7b/ \
+        --model $MODEL_PATH \
         --swap-space 16 \
         --engine-use-ray \
         --worker-use-ray \
         --instance-parallel-size $instance_parallel_size \
-        --use-np-weights \
         --max-num-batched-tokens $max_num_batched_tokens \
         --dispatch-strategy $dispatch_strategy \
         --enable-load-control-prefill $enable_defrag \
@@ -69,15 +79,14 @@ function start_model_server {
 
     echo "disable migrate"
 
-    ulimit -n 65536 && RAY_DEDUP_LOGS=0 && CUDA_VISIBLE_DEVICES=0,1,2,3 \
+    ulimit -n 65536 && RAY_DEDUP_LOGS=0 && CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES \
     python -m vllm.entrypoints.api_server \
         --port $PORT \
-        --model /mnt/data/models/huggingface-models/llama-trained/llama-7b/ \
+        --model $MODEL_PATH \
         --swap-space 16 \
         --engine-use-ray \
         --worker-use-ray \
         --instance-parallel-size $instance_parallel_size \
-        --use-np-weights \
         --max-num-batched-tokens $max_num_batched_tokens \
         --dispatch-strategy $dispatch_strategy \
         --enable-load-control-prefill $enable_defrag \
@@ -118,7 +127,7 @@ for i in ${!oranges[@]}; do
     ulimit -n 65536 && python ../../benchmarks-repo/benchmark_throughput.py \
         --port $PORT \
         --backend vLLM \
-        --tokenizer /mnt/data/models/huggingface-models/llama-trained/llama-7b/ \
+        --tokenizer $MODEL_PATH \
         --random_prompt_lens_mean $imean \
         --random_prompt_lens_range $irange \
         --variable_prompt_lens_distribution $idist \

@@ -1,5 +1,6 @@
+import os
 import socket
-from typing import Optional, Tuple, TYPE_CHECKING
+from typing import List, Optional, Tuple, TYPE_CHECKING
 
 from vllm.config import ParallelConfig
 
@@ -15,6 +16,8 @@ try:
             self.worker = None
 
         def init_worker(self, worker_init_fn):
+            # os.environ['GLOO_SOCKET_IFNAME'] = 'ibs0'
+            # os.environ['TP_SOCKET_IFNAME'] = 'ibs0'
             self.worker = worker_init_fn()
 
         def __getattr__(self, name):
@@ -23,6 +26,13 @@ try:
         def execute_method(self, method, *args, **kwargs):
             executor = getattr(self, method)
             return executor(*args, **kwargs)
+        def get_node_and_gpu_ids(self) -> Tuple[str, List[int]]:
+            node_id = ray.get_runtime_context().get_node_id()
+            gpu_ids = ray.get_gpu_ids()
+            return node_id, gpu_ids
+        def get_node_id(self) -> Tuple[str, List[int]]:
+            node_id = ray.get_runtime_context().get_node_id()
+            return node_id
 
 except ImportError:
     ray = None
@@ -64,6 +74,11 @@ def initialize_cluster(
                 "Ray is not installed. Please install Ray to use distributed "
                 "serving.")
         # Connect to a ray cluster.
+        # if ray_address is None:
+        #     # Use the default Ray cluster address.
+        #     ray_address = os.getenv('HEAD_NODE_IP')+":6379"
+        print(f"Connecting to Ray cluster at {ray_address}...")
+        
         ray.init(address=ray_address, ignore_reinit_error=True)
 
     if not parallel_config.worker_use_ray:

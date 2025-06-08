@@ -179,7 +179,7 @@ if __name__ == "__main__":
     #             log_level="debug",
     #             timeout_keep_alive=TIMEOUT_KEEP_ALIVE)
     from uvicorn import Config, Server
-    config = Config(app=app, loop=loop, host='localhost',
+    config = Config(app=app, loop=loop, host='127.0.0.1',
                     port=args.port, log_level="info")
     uvicorn_server = Server(config)
 

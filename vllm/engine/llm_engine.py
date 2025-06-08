@@ -7,6 +7,7 @@ from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig)
 from vllm.core.scheduler import Scheduler, SchedulerOutputs
 from vllm.engine.arg_utils import EngineArgs
+from vllm.engine.dcgm import GPUMonitor
 from vllm.engine.ray_utils import initialize_cluster, ray, RayWorker
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
@@ -118,6 +119,8 @@ class LLMEngine:
         self.num_migrated_out_request_killed = 0
         self.num_migrated_out_request_running = 0
 
+        self._start_gpu_monitor()
+
     # def _init_workers(self, distributed_init_method: str):
     #     # Lazy import the Worker to avoid importing torch.cuda/xformers
     #     # before CUDA_VISIBLE_DEVICES is set in the Worker
@@ -173,7 +176,23 @@ class LLMEngine:
     #         "init_model",
     #         get_all_outputs=True,
     #     )
+    def _start_gpu_monitor(self) -> None:
+        workers = self.workers
+        worker_node_and_gpu_ids = [
+            ray.get(worker.get_node_and_gpu_ids.remote())  # type: ignore[attr-defined]
+            for worker in workers
+        ]
 
+        worker_device_ids = []
+        for node_and_gpu_ids in worker_node_and_gpu_ids:
+            worker_device_ids += node_and_gpu_ids[1]
+
+        logger.info(f"worker_device_ids: {worker_device_ids};")
+        self.gpuMonitor = GPUMonitor(worker_device_ids, 1000, 10)
+        self.gpuMonitor.start()
+    def get_gpu_metrics(self):
+        gpu_metrics = self.gpuMonitor.get_gpu_metrics()
+        return gpu_metrics 
     def _verify_args(self) -> None:
         self.model_config.verify_with_parallel_config(self.parallel_config)
         self.cache_config.verify_with_parallel_config(self.parallel_config)
@@ -566,6 +585,9 @@ class AsyncActorLLMEngine(LLMEngine):
         super(AsyncActorLLMEngine, self).__init__(instance_id, *args, **kwargs)
         self.recv_fut = None
         self.scaling_down = False
+    # def get_gpu_metrics(self):
+    #     gpu_metrics = self.gpuMonitor.get_gpu_metrics()
+    #     return gpu_metrics  
     
     async def stop_shutdown(self):
         self.scaling_down = False

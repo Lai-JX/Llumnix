@@ -14,7 +14,8 @@ script_args=("$@")
 if [ ! -d "./log/"$log_path ]; then
     mkdir -p "./log/"$log_path
 fi
-
+MODEL_PATH='/share/models/llama/llama-7b/'
+CUDA_VISIBLE_DEVICES=0,1
 config=$1
 config_filepath=$(readlink -f "$config")
 
@@ -30,15 +31,15 @@ function start_model_server_migrate {
 
     echo "enable migrate"
 
-    ulimit -n 65536 && RAY_DEDUP_LOGS=0 && CUDA_VISIBLE_DEVICES=0,1,2,3 \
+    ulimit -n 65536 && RAY_DEDUP_LOGS=0 && CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES \
+    # --use-np-weights \
     python -m vllm.entrypoints.api_server \
         --port $PORT \
-        --model /mnt/data/models/huggingface-models/llama-trained/llama-7b/ \
+        --model $MODEL_PATH \
         --swap-space 16 \
         --engine-use-ray \
         --worker-use-ray \
         --instance-parallel-size $instance_parallel_size \
-        --use-np-weights \
         --max-num-batched-tokens $max_num_batched_tokens \
         --dispatch-strategy $dispatch_strategy \
         --enable-load-control-prefill $enable_defrag \
@@ -69,15 +70,15 @@ function start_model_server {
 
     echo "disable migrate"
 
-    ulimit -n 65536 && RAY_DEDUP_LOGS=0 && CUDA_VISIBLE_DEVICES=0,1,2,3 \
+    ulimit -n 65536 && RAY_DEDUP_LOGS=0 && CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES \
+    # --use-np-weights \
     python -m vllm.entrypoints.api_server \
         --port $PORT \
-        --model /mnt/data/models/huggingface-models/llama-trained/llama-7b/ \
+        --model $MODEL_PATH \
         --swap-space 16 \
         --engine-use-ray \
         --worker-use-ray \
         --instance-parallel-size $instance_parallel_size \
-        --use-np-weights \
         --max-num-batched-tokens $max_num_batched_tokens \
         --dispatch-strategy $dispatch_strategy \
         --enable-load-control-prefill $enable_defrag \
@@ -118,7 +119,7 @@ for i in ${!oranges[@]}; do
     ulimit -n 65536 && python ../../benchmarks-repo/benchmark_throughput.py \
         --port $PORT \
         --backend vLLM \
-        --tokenizer /mnt/data/models/huggingface-models/llama-trained/llama-7b/ \
+        --tokenizer $MODEL_PATH \
         --random_prompt_lens_mean $imean \
         --random_prompt_lens_range $irange \
         --variable_prompt_lens_distribution $idist \
