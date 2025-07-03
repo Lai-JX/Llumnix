@@ -192,3 +192,4 @@ logs/prompts
 logs/analysis/result
 logs/analysis/*.png
 scripts/*.log
+benchmark_test/logs
