@@ -13,8 +13,8 @@
 
 import time
 import bisect
-from typing import Dict, List, Optional, Tuple, Deque
-from collections import deque
+from typing import Dict, List, Optional, Tuple, Deque, Set
+from collections import deque, defaultdict
 
 from vllm.utils import Device
 from vllm.core.block_manager import SelfAttnBlockSpaceManager, BlockTable
@@ -51,11 +51,6 @@ class BlockManagerLlumnix(SelfAttnBlockSpaceManager):
         self._computed_blocks_tracker.add_seq(seq_id)
         self._last_access_blocks_tracker.add_seq(seq_id)
 
-    def can_allocate(self, seq_group: SequenceGroup, *args, **kwargs) -> AllocStatus:
-        if seq_group.status == RequestStatus.WAITING_MIGRATING:
-            return AllocStatus.OK
-        return super().can_allocate(seq_group, *args, **kwargs)
-
 
 class SchedulerLlumnix(Scheduler):
     def __init__(self, *args, **kwargs) -> None:
@@ -67,7 +62,10 @@ class SchedulerLlumnix(Scheduler):
             sliding_window=self.cache_config.sliding_window,
             enable_caching=self.cache_config.enable_prefix_caching)
         self.pre_alloc_cache_dict: Dict[str, BlockTable] = {}
-        self.migrating_out_request_last_stage: Dict[str, SequenceGroupLlumnix] = {}
+        self.instance_migrating_out_requests_last_stage: Dict[str, List[SequenceGroupLlumnix]] = defaultdict(list)
+        self.pre_alloc_request_instance: Dict[str, str] = {}
+        self.pre_alloc_instance_requests: Dict[str, Set[str]] = defaultdict(set)
+        self.migrating_out_request_last_stage: List[SequenceGroupLlumnix] = []
 
     def add_update_instance_info_callback(self, update_instance_info_callback):
         self.update_instance_info_callback = update_instance_info_callback
@@ -130,20 +128,19 @@ class SchedulerLlumnix(Scheduler):
                 return True
         return False
 
-    def add_migrating_out_request_last_stage(self, backend_request: SequenceGroupLlumnix) -> None:
-        self.migrating_out_request_last_stage[backend_request.request_id] = backend_request
+    def add_migrating_out_request_last_stage(self, dst_instance_id: str, backend_request: SequenceGroupLlumnix) -> None:
+        self.instance_migrating_out_requests_last_stage[dst_instance_id].append(backend_request)
 
-    def pop_migrating_out_request_last_stage(self, request_id: str) -> None:
-        assert request_id in self.migrating_out_request_last_stage, \
-            "the request id of migrating out request in last stage should exist in migrating out request last stage"
-        self.migrating_out_request_last_stage.pop(request_id)
+    def remove_migrating_out_request_last_stage(self, dst_instance_id: str, backend_request: SequenceGroupLlumnix) -> None:
+        self.instance_migrating_out_requests_last_stage[dst_instance_id].remove(backend_request)
 
-    def free_migrating_out_requests_last_stage(self) -> List[SequenceGroupLlumnix]:
-        migrating_out_requests_last_stage = list(self.migrating_out_request_last_stage.values())
-        self.migrating_out_request_last_stage.clear()
+    def pop_migrating_out_requests_last_stage(self, dst_instance_id: str) -> List[SequenceGroupLlumnix]:
+        migrating_out_requests_last_stage = self.instance_migrating_out_requests_last_stage[dst_instance_id].copy()
+        self.instance_migrating_out_requests_last_stage[dst_instance_id].clear()
         return migrating_out_requests_last_stage
 
     def pre_alloc(self,
+                  instance_id: str,
                   request_id: str,
                   request_status: RequestStatus,
                   request_arrival_time: float,
@@ -157,7 +154,10 @@ class SchedulerLlumnix(Scheduler):
         block_table = self.pre_alloc_cache_dict.get(request_id, None)
         if not block_table:
             block_table = self.block_manager.get_free_blocks(block_num, token_ids)
+            # TODO(s5u13b): Add unique id generated from instance_id and request_id.
             self.pre_alloc_cache_dict[request_id] = block_table
+            self.pre_alloc_instance_requests[instance_id].add(request_id)
+            self.pre_alloc_request_instance[request_id] = instance_id
         elif self.block_manager.get_num_free_gpu_blocks() >= block_num:
             block_table.append_token_ids(token_ids)
 
@@ -165,6 +165,7 @@ class SchedulerLlumnix(Scheduler):
             # abort migration due to sliding window
             return []
 
+        # Free blocks in migrate_in_pre_alloc function if not enough blocks.
         return block_table.physical_block_ids[-block_num:]
 
     def add_running_request(self, backend_request: LlumnixRequest) -> None:
@@ -198,21 +199,31 @@ class SchedulerLlumnix(Scheduler):
         for seq in seq_group.get_seqs(status=status_from):
             seq.status = status_to
 
-    def free_dst_pre_alloc_cache(self, request_id: str = None) -> None:
+    def free_dst_pre_alloc_cache(self, instance_id: str, request_id: str = None) -> None:
         if request_id:
-            logger.info("free request {} pre_alloc_cache".format(request_id))
-            block_table = self.pre_alloc_cache_dict.pop(request_id, None)
+            logger.info("free instance {} request {} pre_alloc_cache".format(instance_id, request_id))
+            block_table = self.pop_dst_pre_alloc_cache(instance_id, request_id)
             if block_table:
                 block_table.free()
         else:
-            # TODO(s5u13b): Only effective with one-to-one migration restriction.
             # Clear all pre-allocated cache of dst instance when src instance encounters exception.
-            request_ids = list(self.pre_alloc_cache_dict.keys())
-            for req_id in request_ids:
-                logger.info("free request {} pre_alloc_cache".format(req_id))
-                block_table = self.pre_alloc_cache_dict.pop(req_id, None)
-                if block_table:
-                    block_table.free()
+            request_ids = self.pre_alloc_instance_requests.pop(instance_id, None)
+            if request_ids:
+                for req_id in request_ids:
+                    logger.info("free request {} pre_alloc_cache".format(req_id))
+                    block_table = self.pre_alloc_cache_dict.pop(req_id, None)
+                    if block_table:
+                        block_table.free()
+                    self.pre_alloc_request_instance.pop(req_id, None)
+                self.pre_alloc_instance_requests[instance_id].clear()
+
+    def pop_dst_pre_alloc_cache(self, instance_id: str, request_id: str = None) -> BlockTable:
+        block_table = self.pre_alloc_cache_dict.pop(request_id, None)
+        if block_table:
+            src_instance_id = self.pre_alloc_request_instance.pop(request_id)
+            assert src_instance_id == instance_id
+            self.pre_alloc_instance_requests[instance_id].remove(request_id)
+        return block_table
 
     def free_src_request(self, backend_request: SequenceGroupLlumnix) -> None:
         seq = backend_request.get_seqs()[0]

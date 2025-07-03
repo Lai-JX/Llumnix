@@ -33,7 +33,7 @@ from llumnix.arg_utils import ManagerArgs, EntrypointsArgs, InstanceArgs, Launch
 from llumnix.server_info import ServerInfo
 from llumnix.backends.backend_interface import BackendType
 from llumnix.utils import random_uuid, run_coroutine_in_new_thread
-from llumnix.ray_utils import (clear_gloo_backend_ray_resources, get_manager_name, INSTANCE_NAME_PREFIX,
+from llumnix.ray_utils import (clear_gloo_backend_ray_resources, get_manager_name,get_instance_name, INSTANCE_NAME_PREFIX,
                                get_placement_group_name, log_actor_ray_info)
 from llumnix.entrypoints.utils import LaunchMode
 from llumnix.queue.queue_type import QueueType
@@ -131,7 +131,6 @@ class Manager:
         self.servers: Dict[str, APIServerActor] = None
         if hasattr(self, "launch_mode") and self.launch_mode == LaunchMode.GLOBAL:
             self.servers = {}
-        self.instance_migrating: Dict[str, bool] = {}
         self.pending_rebuild_migration_instances = 0
 
         # request states
@@ -140,7 +139,7 @@ class Manager:
 
         # migration states
         self.num_instance_info_updates = 0
-        self.migrating = False
+        self.num_migrating_instance_pairs = 0
 
         # auto-scaling states
         self.scale_up_time = -1
@@ -294,18 +293,15 @@ class Manager:
     async def _migrate(self, pair_migration_type: PairMigrationConstraints) -> None:
         # TODO(s5u13b): Remove the migration done callback through decentralized migration refactoring.
         async def migrate_done_callback(ret, migrate_instance_pair: Tuple[str, str]) -> None:
-            if migrate_instance_pair[0] in self.instance_migrating:
-                self.instance_migrating[migrate_instance_pair[0]] = False
-            if migrate_instance_pair[1] in self.instance_migrating:
-                self.instance_migrating[migrate_instance_pair[1]] = False
+            self.num_migrating_instance_pairs -= 1
             if isinstance(ret, (ray.exceptions.RayActorError, ray.exceptions.RayTaskError, KeyError)):
                 has_error_pair = await self._check_instance_error(migrate_instance_pair)
                 for i, has_error in enumerate(has_error_pair):
                     # Instance without error should clear migration states.
-                    # TODO(s5u13b): Fix the clear_migration_states to adapt to the many-to-many migration.
                     if not has_error:
                         try:
-                            await self.instances[migrate_instance_pair[i]].clear_migration_states.remote(is_migrate_in=bool(i))
+                            await self.instances[migrate_instance_pair[i]].clear_migration_states.remote(
+                                is_migrate_in=bool(i), instance_id=migrate_instance_pair[1 - i])
                         except (ray.exceptions.RayActorError, ray.exceptions.RayTaskError, KeyError):
                             has_error = True
                 for i, has_error in enumerate(has_error_pair):
@@ -331,14 +327,11 @@ class Manager:
             migrate_instance_pairs = self.global_scheduler.pair_migration(pair_migration_type)
             migration_tasks = []
             for _, migrate_instance_pair in enumerate(migrate_instance_pairs):
-                src_instance_id, dst_instance_id = migrate_instance_pair
-                if self.instance_migrating[src_instance_id] or self.instance_migrating[dst_instance_id]:
-                    continue
-                self.instance_migrating[src_instance_id] = True
-                self.instance_migrating[dst_instance_id] = True
-                dst_instance_actor_handle = self.instances[dst_instance_id]
-                task = asyncio.gather(self.instances[src_instance_id].migrate_out.remote(
-                                        dst_instance_id, dst_instance_actor_handle), return_exceptions=True)
+                self.num_migrating_instance_pairs += 1
+                migrate_out_instance_id, migrate_in_instance_id = migrate_instance_pair
+                migrate_in_instance_name = get_instance_name(migrate_in_instance_id)
+                task = asyncio.gather(self.instances[migrate_out_instance_id].migrate_out.remote(migrate_in_instance_name),
+                                      return_exceptions=True)
                 task.add_done_callback(partial(migrate_done_callback_wrapper, migrate_instance_pair))
                 migration_tasks.append(task)
             if len(migration_tasks) > 0 and not self.enable_pd_disagg:
@@ -382,7 +375,6 @@ class Manager:
                 self.pgs[ins_id] = placement_groups[idx]
                 if self.servers is not None and servers is not None:
                     self.servers[ins_id] = servers[idx]
-                self.instance_migrating[ins_id] = False
                 if self.log_instance_info:
                     self.instance_last_logged_empty[ins_id] = False
                 self.pending_rebuild_migration_instances += 1
@@ -424,11 +416,7 @@ class Manager:
                         else:
                             logger.warning("instance {} is not in servers".format(ins_id))
                 else:
-                    logger.warning("instance {} is not in instances".format(ins_id))
-                if ins_id in self.instance_migrating:
-                    del self.instance_migrating[ins_id]
-                else:
-                    logger.warning("instance {} is not in instance_migrating".format(ins_id))
+                    logger.debug("instance {} is not in instances".format(ins_id))
                 if self.log_instance_info:
                     if ins_id in self.instance_last_logged_empty:
                         del self.instance_last_logged_empty[ins_id]
@@ -463,7 +451,7 @@ class Manager:
     # TODO(KuilongCui): Add comments for this function.
     async def _rebuild_migration_backend(self) -> None:
         # Wait for all instances to finish migration
-        while any(self.instance_migrating.values()):
+        while self.num_migrating_instance_pairs > 0:
             await asyncio.sleep(WAIT_ALL_MIGRATIONS_DONE_INTERVAL)
 
         # During rebuilding migration backend, disable migration.

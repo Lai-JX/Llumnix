@@ -118,7 +118,7 @@ class BackendInterface(ABC):
         should be suspend.
 
         Args:
-            request_id: The ID for the request that is to be removed from the running queue.
+            request_id: The ID of the request that is to be removed from the running queue.
 
         Returns:
             True if the request was successfully removed from the running queue, False otherwise.
@@ -142,7 +142,7 @@ class BackendInterface(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def add_migrating_out_request_last_stage(self, backend_request: LlumnixRequest) -> None:
+    def add_migrating_out_request_last_stage(self, dst_instance_id: str, backend_request: LlumnixRequest) -> None:
         """
         Add a backend request to the dict of migrating out requests in last stage.
 
@@ -151,12 +151,13 @@ class BackendInterface(ABC):
         running queue.
 
         Args:
+            dst_instance_id: The ID of destination instance.
             backend_request: An object representing the backend request.
         """
         raise NotImplementedError
 
     @abstractmethod
-    def pop_migrating_out_request_last_stage(self, backend_request: LlumnixRequest) -> None:
+    def remove_migrating_out_request_last_stage(self, dst_instance_id: str, backend_request: LlumnixRequest) -> None:
         """
         Pop a backend request from the dict of migrating out requests in last stage.
 
@@ -164,12 +165,13 @@ class BackendInterface(ABC):
         This action is performed after the migration is finished successfully.
 
         Args:
+            dst_instance_id: The ID of destination instance.
             backend_request: An object representing the backend request.
         """
         raise NotImplementedError
 
     @abstractmethod
-    def free_migrating_out_requests_last_stage(self) -> List[LlumnixRequest]:
+    def pop_migrating_out_requests_last_stage(self, dst_instance_id: str) -> List[LlumnixRequest]:
         """
         Pop the list of migrating out requests in last stage.
 
@@ -177,12 +179,14 @@ class BackendInterface(ABC):
         to free migrating out requests in last stage when the migration encounters exception.
 
         Returns:
+            dst_instance_id: The ID of destination instance.
             The list of migrating out requests in last stage.
         """
         raise NotImplementedError
 
     @abstractmethod
     def pre_alloc(self,
+                  instance_id: str,
                   request_id: str,
                   request_status: RequestStatus,
                   request_arrival_time: float,
@@ -198,6 +202,7 @@ class BackendInterface(ABC):
         instance's waiting queue.
 
         Args:
+            instance_id: The ID of the source instance.
             request_id: The ID of the migration request for which cache blocks are to be pre-allocated.
             request_status: The status (waiting/running) of the request.
             request_arrival_time: The arrival time of the request.
@@ -235,7 +240,7 @@ class BackendInterface(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def free_dst_pre_alloc_cache(self, request_id: str = None) -> None:
+    def free_dst_pre_alloc_cache(self, instance_id: str, request_id: str = None) -> None:
         """Free pre-allocated blocks for a migrating request on the destination instance.
 
         This method is responsible for releasing any cache blocks and other resources that were
@@ -243,6 +248,7 @@ class BackendInterface(ABC):
         after the migration aborted to ensure that resources are not left reserved unnecessarily.
 
         Args:
+            instance_id: The ID of the source instance.
             request_id: The ID of the request for which resources are to be freed on the destination instance.
         """
         raise NotImplementedError
@@ -287,7 +293,7 @@ class BackendInterface(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    async def commit_dst_request(self, backend_request: LlumnixRequest) -> None:
+    def commit_dst_request(self, instance_id: str, backend_request: LlumnixRequest) -> None:
         """Commit the migrating request to the destination instance.
 
         This method finalizes the migration process by transferring all necessary metadata and resource information
@@ -295,6 +301,7 @@ class BackendInterface(ABC):
         all the required data to resume and handle the request as if it originated there natively.
 
         Args:
+            instance_id: The ID of the source instance.
             backend_request: An object representing the backend request.
         """
         raise NotImplementedError

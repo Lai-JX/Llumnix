@@ -23,31 +23,25 @@ import requests
 from llumnix.utils import get_ip_address, try_convert_to_local_path
 
 
-def generate_vllm_launch_command(
-    result_filename: str = "",
-    launch_ray_cluster: bool = False,
-    HEAD_NODE_IP: str = "127.0.0.1",
-    ip: str = get_ip_address(),
-    port: int = 37000,
-    instances_num: int = 1,
-    dispatch_policy: str = "load",
-    migration_backend: str = "gloo",
-    model: str = try_convert_to_local_path("facebook/opt-125m"),
-    max_model_len: int = 4096,
-    log_instance_info: bool = False,
-    log_request_timestamps: bool = False,
-    request_migration_policy: str = 'SR',
-    max_num_batched_tokens: int = 16000,
-    enable_pd_disagg: bool = False,
-    instance_type: str = "no_constraints",
-    tensor_parallel_size: int = 1,
-    enable_simulator: bool = False,
-    request_output_queue_type: str = "zmq",
-    config_path: str = "configs/vllm.yml",
-    enable_migration: bool = True,
-    enforce_eager: bool = True,
-    **kwargs
-):
+def generate_launch_command(result_filename: str = "",
+                            launch_ray_cluster: bool = True,
+                            HEAD_NODE_IP: str = "127.0.0.1",
+                            ip: str = "127.0.0.1",
+                            port: int = 37000,
+                            instances_num = 1,
+                            dispatch_policy: str = "load",
+                            migration_backend = "gloo",
+                            model = "facebook/opt-125m",
+                            max_model_len: int = 4096,
+                            log_instance_info: bool = False,
+                            log_request_timestamps: bool = False,
+                            request_migration_policy: str = 'SR',
+                            max_num_batched_tokens: int = 16000,
+                            enable_pd_disagg: bool = False,
+                            instance_type: str = "no_constraints",
+                            tensor_parallel_size: int = 1,
+                            enable_simulator: bool = False,
+                            migration_num_buffers: int = 1):
     command = (
         f"RAY_DEDUP_LOGS=0 HEAD_NODE_IP={HEAD_NODE_IP} HEAD_NODE=1 "
         f"nohup python -u -m llumnix.entrypoints.vllm.api_server "
@@ -67,6 +61,7 @@ def generate_vllm_launch_command(
         f"--request-migration-policy {request_migration_policy} "
         f"--migration-backend {migration_backend} "
         f"--migration-buffer-blocks 32 "
+        f"--migration-num-buffers {migration_num_buffers} "
         f"--tensor-parallel-size {tensor_parallel_size} "
         f"--request-output-queue-type {request_output_queue_type} "
         f"--request-output-queue-port {port + 10} "
@@ -82,29 +77,21 @@ def generate_vllm_launch_command(
     )
     return command
 
-def generate_vllm_serve_command(
-    result_filename: str = "",
-    ip: str = get_ip_address(),
-    port: int = 37000,
-    dispatch_policy: str = "load",
-    migration_backend: str = "gloo",
-    model: str = try_convert_to_local_path("facebook/opt-125m"),
-    max_model_len: int = 4096,
-    log_instance_info: bool = False,
-    log_request_timestamps: bool = True,
-    request_migration_policy: str = 'SR',
-    max_num_batched_tokens: int = 16000,
-    enable_pd_disagg: bool = False,
-    pd_ratio: str = "1:1",
-    enable_simulator: bool = False,
-    request_output_queue_type: str = "zmq",
-    config_path: str = "configs/vllm.yml",
-    tensor_parallel_size: int = 1,
-    enable_migration: bool = True,
-    enforce_eager: bool = True,
-    max_instances: int = 4,
-    **kwargs
-):
+def generate_serve_command(result_filename: str = "",
+                           ip: str = "127.0.0.1",
+                           port: int = 37000,
+                           dispatch_policy: str = "load",
+                           migration_backend = "gloo",
+                           model = "facebook/opt-125m",
+                           max_model_len: int = 4096,
+                           log_instance_info: bool = False,
+                           log_request_timestamps: bool = True,
+                           request_migration_policy: str = 'SR',
+                           max_num_batched_tokens: int = 16000,
+                           enable_pd_disagg: bool = False,
+                           pd_ratio: str = "1:1",
+                           enable_simulator: bool = False,
+                           migration_num_buffers: int = 1):
     command = (
         f"RAY_DEDUP_LOGS=0 "
         f"nohup python -u -m llumnix.entrypoints.vllm.serve "
@@ -123,6 +110,7 @@ def generate_vllm_serve_command(
         f"--request-migration-policy {request_migration_policy} "
         f"--migration-backend {migration_backend} "
         f"--migration-buffer-blocks 32 "
+        f"--migration-num-buffers {migration_num_buffers} "
         f"--tensor-parallel-size {tensor_parallel_size} "
         f"--request-output-queue-type {request_output_queue_type} "
         f"--request-output-queue-port {port + 10} "

@@ -81,9 +81,8 @@ def create_worker(rank: int, local_rank: int, engine_config: EngineConfig,
 
 @pytest.mark.parametrize("backend", ['rayrpc', 'gloo', 'nccl'])
 def test_reserve_memory_for_migration(ray_env, backend):
-    engine_config = EngineArgs(model=try_convert_to_local_path("facebook/opt-125m"), download_dir="/mnt/model",
-                               max_model_len=8, enforce_eager=True).create_engine_config()
-    migration_config = InstanceArgs(migration_buffer_blocks=1).create_migration_config()
+    engine_config = EngineArgs(model='facebook/opt-125m', max_model_len=8, enforce_eager=True).create_engine_config()
+    migration_config = InstanceArgs(migration_buffer_blocks=1, migration_num_buffers=2).create_migration_config()
     migration_config.migration_backend = backend
     worker = create_worker(rank=0, local_rank=0, engine_config=engine_config)
     ray.get(worker.execute_method.remote('init_device'))
@@ -91,7 +90,8 @@ def test_reserve_memory_for_migration(ray_env, backend):
     block_size = CacheEngine.get_cache_block_size(engine_config.cache_config, engine_config.model_config,
                                                   engine_config.parallel_config)
     num_layers = engine_config.model_config.get_num_layers(engine_config.parallel_config)
-    occupy_memory = migration_config.migration_buffer_blocks * block_size * migration_config.migration_num_layers // num_layers
+    occupy_memory = migration_config.migration_num_buffers * migration_config.migration_buffer_blocks * block_size \
+                        * migration_config.migration_num_layers // num_layers
 
     migration_cache_size = ray.get(worker.execute_method.remote('reserve_memory_for_migration',
                                                                 migration_config=migration_config,

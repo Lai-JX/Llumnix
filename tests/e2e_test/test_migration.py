@@ -103,50 +103,16 @@ def get_instance_num_blocks():
 @pytest.mark.parametrize("migration_backend", ['rayrpc', 'gloo', 'nccl', 'grpc', 'kvtransfer'])
 @pytest.mark.parametrize("migration_request_status", ['running', 'waiting'])
 @pytest.mark.parametrize("tensor_parallel_size", [1, 2])
-@pytest.mark.parametrize("use_ray_spmd_worker", [True, False])
-@pytest.mark.parametrize("engine", ["engine_vLLM", "engine_BladeLLM"])
-async def test_migration_benchmark(request, ray_env, shutdown_llumnix_service, model, tensor_parallel_size,
-                                   migration_backend, migration_request_status, use_ray_spmd_worker, engine):
-    engine = engine.split("_")[1]
-
-    num_prompts = 500
-
-    # TODO(s5u13b): fix this bug
-    if "BladeLLM" in engine and tensor_parallel_size > 1:
-        pytest.skip("Error in BladeLLM for tensor parallel size > 1.")
-
-    if "BladeLLM" in engine and use_ray_spmd_worker:
-        pytest.skip("use_ray_spmd_worker is vLLM config, just skip it in BladeLLM.")
-
-    if engine == "BladeLLM" and migration_backend not in ['grpc', 'kvtransfer']:
-        pytest.skip(f"BladeLLM does not support migration backend {migration_backend}")
-
-    if engine == "vLLM" and migration_backend not in ['rayrpc', 'gloo', 'nccl']:
-        pytest.skip(f"vLLM does not support migration backend {migration_backend}.")
-
-    if migration_request_status == 'waiting' and engine == 'BladeLLM':
-        pytest.skip("BladeLLM does not support migrating waiting request temporarily.")
-
-    if migration_request_status == 'waiting' and migration_backend != 'rayrpc':
-        pytest.skip("When the migrated request status is waiting, only test the rayrpc migration backend.")
-
-    if tensor_parallel_size == 2 and migration_backend == 'nccl':
-        pytest.skip("When the migration backend is nccl, tensor parallelism is not supported.")
-    if use_ray_spmd_worker and migration_backend != 'gloo':
-        pytest.skip("When use_ray_spmd_worker is True, only test the gloo migration backend.")
-    if use_ray_spmd_worker and tensor_parallel_size == 2:
-        pytest.skip("When using ray spmd worker, ray will raise RayCgraphCapacityExceeded exeception when tensor parallelism is enabled.")
-    if use_ray_spmd_worker and migration_request_status == 'waiting':
-        pytest.skip("When using ray spmd worker, only migrating running request will have different migration process.")
-
-    if use_ray_spmd_worker:
-        os.environ["VLLM_USE_RAY_SPMD_WORKER"] = "1"
-        os.environ["VLLM_USE_RAY_COMPILED_DAG"] = "1"
-    else:
-        os.environ["VLLM_USE_RAY_SPMD_WORKER"] = "0"
-        os.environ["VLLM_USE_RAY_COMPILED_DAG"] = "0"
-
-    global test_times
+@pytest.mark.parametrize("migration_num_buffers", [1, 4])
+async def test_migration_benchmark(ray_env, shutdown_llumnix_service, model, migration_backend, migration_request_status, tensor_parallel_size,
+                                   migration_num_buffers):
+    if migration_request_status == 'waiting' and migration_backend != 'gloo':
+        pytest.skip("When the migrated request status is waiting, only test the gloo migration backend.")
+    if tensor_parallel_size == 2 and migration_backend != 'gloo':
+        pytest.skip("When the tensor parallel size is 2, only test the gloo migration backend.")
+    if migration_num_buffers == 4 and (migration_backend != 'rayrpc' or migration_request_status != 'running'):
+        pytest.skip("When the migration num buffers is 4, only test the rayrpc migration backend and"
+                    "running migration request status.")
 
     request_migration_policy = 'SR' if migration_request_status == 'running' else 'FCW'
     ip = get_ip_address()
@@ -155,38 +121,21 @@ async def test_migration_benchmark(request, ray_env, shutdown_llumnix_service, m
     instance_output_logs = []
     device_count = min(4, torch.cuda.device_count())
     num_instances = device_count // tensor_parallel_size
-
-    if engine == "vLLM":
-        for i in range(num_instances):
-            ip_ports.append(f"{ip}:{base_port+i}")
-        result_filename = f"{base_port}.out"
-        instance_output_logs.append("instance_"+result_filename)
-        launch_command = generate_vllm_serve_command(
-                            result_filename=result_filename,
-                            ip=ip,
-                            port=base_port,
-                            model=model,
-                            dispatch_policy="flood",
-                            migration_backend=migration_backend,
-                            request_migration_policy=request_migration_policy,
-                            tensor_parallel_size=tensor_parallel_size,
-                            enforce_eager=False,
-                            max_instances=num_instances)
-        subprocess.run(launch_command, shell=True, check=True)
-    else:
-        for i in range(num_instances):
-            ip_ports.append(f"{ip}:{base_port+i}")
-        result_filename = f"{base_port}.out"
-        instance_output_logs.append("instance_"+result_filename)
-        launch_command = generate_bladellm_serve_command(
-                            result_filename=result_filename,
-                            ip=ip,
-                            port=base_port,
-                            model=model,
-                            dispatch_policy="flood",
-                            migration_backend=migration_backend,
-                            tensor_parallel_size=tensor_parallel_size,
-                            max_instances=num_instances)
+    for i in range(num_instances):
+        port = base_port + i
+        ip_ports.append(f"{ip}:{base_port+i}")
+        output_log = f"{base_port+i}.out"
+        instance_output_logs.append("instance_"+output_log)
+        launch_command = generate_launch_command(result_filename=output_log,
+                                                 launch_ray_cluster=False,
+                                                 ip=ip,
+                                                 port=port,
+                                                 model=model,
+                                                 dispatch_policy="flood",
+                                                 migration_backend=migration_backend,
+                                                 request_migration_policy=request_migration_policy,
+                                                 tensor_parallel_size=tensor_parallel_size,
+                                                 migration_num_buffers=migration_num_buffers)
         subprocess.run(launch_command, shell=True, check=True)
 
     wait_for_llumnix_service_ready(ip_ports)
