@@ -159,6 +159,8 @@ def init_llumnix_components(entrypoints_args: EntrypointsArgs,
             request_output_queue_type)
     else:
         # zmq context cannot be serialized, so init zmq queue server in driver.
+        logger.info("init_request_output_queue_server, port: {}."
+                    .format(request_output_queue_port))
         request_output_queue = init_request_output_queue_server(ip, request_output_queue_port, request_output_queue_type)
 
     return manager, available_instance_ids, available_instances, request_output_queue

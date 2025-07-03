@@ -165,6 +165,37 @@ class Llumlet:
                 self_actor = ray.get_actor(name=self.actor_name, namespace="llumnix")
                 ray.kill(self_actor)
 
+    # async def migrate_out(self, dst_instance_id: str, dst_instance_actor_handle: ray.actor.ActorHandle) -> List[str]:
+    #     migrate_out_requests = self.migration_scheduler.get_migrate_out_requests()
+
+    #     if len(migrate_out_requests) == 0:
+    #         return []
+
+    #     for migrate_out_request in migrate_out_requests:
+    #         migrate_out_request.is_migrating = True
+
+    #     migrated_request_list = []
+    #     logger.info("[LJX] Llumlet._migrate_out start, timestamps: {}".format(time.time()))
+    #     for migrate_out_request in migrate_out_requests:
+
+    #         migrate_out_one_request_begin = time.time()
+    #         logger.info("[LJX] Llumlet._migrate_out_one_request start, {}, timestamps: {}".format(migrate_out_request.request_id, migrate_out_one_request_begin))
+    #         set_timestamp(migrate_out_request.server_info, "migrate_out_one_request_begin", time.time())
+            
+    #         migrated_request = await self._migrate_out_one_request(migrate_out_request, dst_instance_id, dst_instance_actor_handle)
+            
+    #         migrate_out_one_request_end = time.time()
+    #         logger.info("[LJX] Llumlet._migrate_out_one_request end, {}, timestamps: {}".format(migrate_out_request.request_id, migrate_out_one_request_end))
+    #         logger.info("[LJX] Llumlet._migrate_out_one_request latency: {} ms".format((migrate_out_one_request_end - migrate_out_one_request_begin)*1000))
+            
+    #         migrated_request_list.extend(migrated_request)
+    #         if len(migrated_request) == 0 and migrate_out_request.eom:
+    #             break
+    #     logger.info("[LJX] Llumlet._migrate_out end, timestamps: {}".format(time.time()))
+
+    #     return migrated_request_list
+    
+
     async def migrate_out(self, dst_instance_id: str, dst_instance_actor_handle: ray.actor.ActorHandle) -> List[str]:
         migrate_out_requests = self.migration_scheduler.get_migrate_out_requests()
 
@@ -176,23 +207,27 @@ class Llumlet:
 
         migrated_request_list = []
         logger.info("[LJX] Llumlet._migrate_out start, timestamps: {}".format(time.time()))
-        for migrate_out_request in migrate_out_requests:
 
+        tasks = []
+        for migrate_out_request in migrate_out_requests:
+            migrate_out_request.is_migrating = True
             migrate_out_one_request_begin = time.time()
             logger.info("[LJX] Llumlet._migrate_out_one_request start, {}, timestamps: {}".format(migrate_out_request.request_id, migrate_out_one_request_begin))
             set_timestamp(migrate_out_request.server_info, "migrate_out_one_request_begin", time.time())
-            
-            migrated_request = await self._migrate_out_one_request(migrate_out_request, dst_instance_id, dst_instance_actor_handle)
-            
+            tasks.append(self._migrate_out_one_request(migrate_out_request, dst_instance_id, dst_instance_actor_handle))
+
+        # 并发执行所有迁移
+        results = await asyncio.gather(*tasks)
+
+        for migrated_request, migrate_out_request in zip(results, migrate_out_requests):
             migrate_out_one_request_end = time.time()
             logger.info("[LJX] Llumlet._migrate_out_one_request end, {}, timestamps: {}".format(migrate_out_request.request_id, migrate_out_one_request_end))
             logger.info("[LJX] Llumlet._migrate_out_one_request latency: {} ms".format((migrate_out_one_request_end - migrate_out_one_request_begin)*1000))
-            
             migrated_request_list.extend(migrated_request)
             if len(migrated_request) == 0 and migrate_out_request.eom:
                 break
-        logger.info("[LJX] Llumlet._migrate_out end, timestamps: {}".format(time.time()))
 
+        logger.info("[LJX] Llumlet._migrate_out end, timestamps: {}".format(time.time()))
         return migrated_request_list
 
     async def _migrate_out_one_request(self,
