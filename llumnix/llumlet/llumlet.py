@@ -152,7 +152,8 @@ class Llumlet:
 
         for migrate_out_request in migrate_out_requests:
             migrate_out_request.is_migrating = True
-
+        request_ids = [migrate_out_request.request_id for migrate_out_request in migrate_out_requests]
+        logger.info("[LJX] Llumlet._migrate_out start, timestamps: {}, request_ids:{}".format(time.time(),request_ids))
         migrated_request_list = []
         for migrate_out_request in migrate_out_requests:
             migrated_request = await self._migrate_out_one_request(migrate_out_request, dst_instance_name)

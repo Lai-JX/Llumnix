@@ -192,6 +192,3 @@ logs/analysis/result
 logs/analysis/*.png
 scripts/*.log
 benchmark_test/logs
-
-benchmark_test/scripts/kill.sh
-benchmark_test/scripts/run_pdd_multi.sh
