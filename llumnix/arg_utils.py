@@ -23,7 +23,7 @@ from llumnix.config import LlumnixConfig, get_llumnix_config
 from llumnix.config.default import _C
 from llumnix.backends.backend_interface import BackendType
 from llumnix.entrypoints.utils import LaunchMode
-
+from llumnix import envs as llumnix_envs
 
 # All the default values of llumnix arguments are set in default.py. So all the arguments here are set to None for default.
 
@@ -376,6 +376,7 @@ class InstanceArgs:
 
     migration_backend: str = None
     migration_buffer_blocks: int = None
+    migration_num_buffers: int = None
     migration_num_layers: int = None
     migration_backend_init_timeout: float = None
     kvtransfer_migration_backend_transfer_type: str = None
@@ -436,11 +437,20 @@ class InstanceArgs:
         if manager_args.enable_pd_disagg and launch_mode == LaunchMode.LOCAL:
             assert args.instance_type in ['prefill', 'decode'], \
                 "instance_type should be prefill or decode if enable_pd_disagg is set."
+        
+        worker_max_concurrency = llumnix_envs.LLUMNIX_WORKER_MAX_CONCURRENCY
+        max_migration_num_buffers = worker_max_concurrency - 1
+        assert args.migration_num_buffers <= max_migration_num_buffers, "Due to the max_concurrency of worker and proxy actor, \
+            the concurrency of migration could not exceed {}.".format(max_migration_num_buffers)
+
+        assert args.migration_num_buffers == 1 or args.migration_backend == "rayrpc", \
+            "Only the rayrpc migration backend supports concurrent migration."
 
     def create_migration_config(self) -> MigrationConfig:
         migration_config = MigrationConfig(self.request_migration_policy,
                                            self.migration_backend,
                                            self.migration_buffer_blocks,
+                                           self.migration_num_buffers,
                                            self.migration_num_layers,
                                            self.migration_last_stage_max_blocks,
                                            self.migration_max_stages,
@@ -501,6 +511,9 @@ class InstanceArgs:
         parser.add_argument('--migration-buffer-blocks',
                             type=int,
                             help='number of buffer blocks in migration')
+        parser.add_argument('--migration-num-buffers',
+                            type=int,
+                            help='number of the buffers in migration backend for migration')
         parser.add_argument('--migration-num-layers',
                             type=int,
                             help='number of kv-cache layers to transfer in each round during migration')

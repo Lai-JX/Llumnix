@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     LLUMNIX_LOG_NODE_PATH: str = ""
     MODEL_PATH: str = ""
     DATASET_PATH: str = ""
+    LLUMNIX_WORKER_MAX_CONCURRENCY: int = 9
 
 
 environment_variables: Dict[str, Callable[[], Any]] = {
@@ -56,6 +57,12 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     lambda: os.getenv("MODEL_PATH", ""),
     "DATASET_PATH":
     lambda: os.getenv("DATASET_PATH", ""),
+
+    
+    # Max concurrency of worker, which should larger than 2 to support migration
+    # and should be equal to migration_num_buffers + 1 to support concurrent migrations.
+    "LLUMNIX_WORKER_MAX_CONCURRENCY":
+    lambda: int(os.getenv("LLUMNIX_WORKER_MAX_CONCURRENCY", "5")),
 }
 
 

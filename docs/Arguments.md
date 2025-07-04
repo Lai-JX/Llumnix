@@ -48,6 +48,7 @@ usage: -m llumnix.entrypoints.vllm.api_server [-h]
             [--migration-backend {gloo,nccl,rayrpc,grpc,kvtransfer}]
             [--migration-buffer-blocks MIGRATION_BUFFER_BLOCKS]
             [--migration-num-layers MIGRATION_NUM_LAYERS]
+            [--migration-num-buffers MIGRATION_NUM_BUFFERS]
             [--migration-backend-init-timeout MIGRATION_BACKEND_INIT_TIMEOUT]
             [--kvtransfer-migration-backend-transfer-type {ipc,rdma}]
             [--grpc-migration-backend-server-port GRPC_MIGRATION_BACKEND_SERVER_PORT]
@@ -222,8 +223,12 @@ usage: -m llumnix.entrypoints.vllm.api_server [-h]
 - Default: "gloo"
 
 `--migration-buffer-blocks`
-- Number of buffer blocks in migration.
+- Number of buffer blocks each migration buffer.
 - Default: 512
+
+`--migration-num-buffers`
+- Number of the buffers in migration backend for migration.
+- Default: 2
 
 `--migration-num-layers`
 - number of kv-cache layers to transfer in each round during migration
