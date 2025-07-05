@@ -46,8 +46,8 @@ class ProxyActor:
         self.is_driver_worker = is_driver_worker
         self.use_ray_spmd_worker = use_ray_spmd_worker
 
-    def exec_method(self, handle: ray.actor.ActorHandle, *args, **kwargs) -> Any:
-        if self.is_driver_worker and not self.use_ray_spmd_worker:
+    def exec_method(self, handle: ray.actor.ActorHandle, from_driver_worker=None, *args, **kwargs) -> Any:
+        if (from_driver_worker) is True or (self.is_driver_worker and not self.use_ray_spmd_worker):
             ret = ray_get_with_timeout(
                 handle.execute_engine_method_async.remote(
                     "execute_driver_worker_method_async", *args, **kwargs
@@ -162,6 +162,7 @@ class RayRpcMigrationBackend(MigrationBackendBase):
             # TODO(s5u13b): Remote call has serialization cost, optimize it.
             ray_obj = self.proxy_actor.exec_method.remote(
                 src_worker_handle,
+                from_driver_worker,
                 "do_send",
                 None,
                 send_blocks,

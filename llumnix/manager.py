@@ -52,6 +52,7 @@ from llumnix.ray_utils import (
     get_scaler_name,
 )
 from llumnix.constants import (
+    GPU_FIELDS_MAP,
     NO_INSTANCE_RETRY_GENERATE_INTERVAL,
     WAIT_ALL_MIGRATIONS_DONE_INTERVAL,
     MAX_ACTOR_METHOD_RETRIES,

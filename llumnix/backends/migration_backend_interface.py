@@ -45,10 +45,10 @@ class MigrationBackendBase(ABC):
     
     @abstractmethod
     def migrate_cache_subtract_tp(self,
-                      src_handle: List["ray.actor.ActorHandle"],
+                      request_id: RequestIDType,
+                      src_worker_handle: List["ray.actor.ActorHandle"],
                       src_blocks: List[int],
                       dst_blocks: List[int],
-                      request_id: str,
                       is_last_stage: bool,
                       chunk_size: int=1,
                       chunk_rank: int=0) -> None:

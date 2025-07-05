@@ -72,8 +72,8 @@ Llumnix_benchmark() {
                     --log-request-timestamps \
                     --tensor-parallel-size $TP \
                     --request-output-queue-type zmq \
-                    --request-output-queue-port $(($port_base + 50)) \
                     --log-filename $BASE_DIR/serve_$count\_tp$TP\_$REQ_NUM\_qps_$QPS > $BASE_DIR/serve_$count\_tp$TP\_$REQ_NUM\_qps_$QPS.log 2>&1 &
+                    #--request-output-queue-port $(($port_base + 50)) \
     echo $(($port_base + 50))
 
     sleep 15
@@ -94,8 +94,8 @@ Llumnix_benchmark() {
                     --log-request-timestamps \
                     --tensor-parallel-size $TP \
                     --request-output-queue-type zmq \
-                    --request-output-queue-port $(($port + 50)) \
                     --log-filename $BASE_DIR/serve_$((count + 1))\_tp$TP\_$REQ_NUM\_qps_$QPS > output2.log 2>&1 &
+                    #--request-output-queue-port $(($port_base + 50)) \
     done
 
     # 判断$HEAD_NODE_IP:1234是否可用 
@@ -162,8 +162,9 @@ Llumnix_benchmark_pdd() {
                 --tensor-parallel-size $TP \
                 --max-num-seqs $REQ_NUM \
                 --request-output-queue-type zmq \
-                --request-output-queue-port $(($port_base + 50)) \
                 --log-filename $BASE_DIR/serve_pdd_tp$TP\_$REQ_NUM\_qps_$QPS\_$prefill_count\_$decode_count > $BASE_DIR/serve_pdd_tp$TP\_$REQ_NUM\_qps_$QPS\_$prefill_count\_$decode_count.log 2>&1 &
+                #--request-output-queue-port $(($port_base + 50)) \
+
     sleep 15
     # 启动 prefill 实例
     port_base=$(($port_base + 1))
@@ -185,8 +186,8 @@ Llumnix_benchmark_pdd() {
                     --tensor-parallel-size $TP \
                     --max-num-seqs $REQ_NUM \
                     --request-output-queue-type zmq \
-                    --request-output-queue-port $(($port + 50)) \
                     --log-filename $BASE_DIR/serve_pdd_tp$TP\_$REQ_NUM\_qps_$QPS\_$((prefill_count + 1))\_$decode_count > output1.log 2>&1 &
+                    #--request-output-queue-port $(($port_base + 50)) \
     done
     # sleep 10
     # 启动 decode 实例
@@ -209,8 +210,9 @@ Llumnix_benchmark_pdd() {
                     --tensor-parallel-size $TP \
                     --max-num-seqs $REQ_NUM \
                     --request-output-queue-type zmq \
-                    --request-output-queue-port $(($port + 50)) \
                     --log-filename $BASE_DIR/serve_pdd_tp$TP\_$REQ_NUM\_qps_$QPS\_$((prefill_count + 1))\_$decode_count > output2.log 2>&1 &
+                    #--request-output-queue-port $(($port + 50)) \
+                    
     done
 
     # 判断$HEAD_NODE_IP:1234是否可用 

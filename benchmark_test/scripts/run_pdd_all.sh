@@ -1,9 +1,9 @@
 #!/bin/bash
 req_num=2000
-gputype=L40-multi-port-zmp-parallel
+gputype=A6000-2-multi-port-zmp-parallel-main
 prefix="$gputype-pdd-hetero"
-# ./run_pdd_multi.sh 1 $req_num 4 llama-7b poisson 6 $gputype
-./tp_heterogeneity.sh "1,1" "2" $req_num llama-7b poisson 6 $prefix
+./run_pdd_multi.sh 1 $req_num 4 llama-7b poisson 6 $gputype
+# ./tp_heterogeneity.sh "1,1" "2" $req_num llama-7b poisson 6 $prefix
 exit 0
 # ./run_pdd_multi.sh 1 $req_num 4 llama-7b poisson 2 $gputype
 # ./run_pdd_multi.sh 1 $req_num 4 llama-7b poisson 4 $gputype

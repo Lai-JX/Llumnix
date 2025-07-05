@@ -160,82 +160,82 @@ class Llumlet:
     #     return migrated_request_list
     
 
-    async def migrate_out(self, dst_instance_id: str, dst_instance_actor_handle: ray.actor.ActorHandle) -> List[str]:
-        migrate_out_requests = self.migration_scheduler.get_migrate_out_requests()
+    # async def migrate_out(self, dst_instance_id: str, dst_instance_actor_handle: ray.actor.ActorHandle) -> List[str]:
+    #     migrate_out_requests = self.migration_scheduler.get_migrate_out_requests()
 
-        if len(migrate_out_requests) == 0:
-            return []
+    #     if len(migrate_out_requests) == 0:
+    #         return []
 
-        for migrate_out_request in migrate_out_requests:
-            migrate_out_request.is_migrating = True
+    #     for migrate_out_request in migrate_out_requests:
+    #         migrate_out_request.is_migrating = True
 
-        migrated_request_list = []
-        logger.info("[LJX] Llumlet._migrate_out start, timestamps: {}".format(time.time()))
+    #     migrated_request_list = []
+    #     logger.info("[LJX] Llumlet._migrate_out start, timestamps: {}".format(time.time()))
 
-        tasks = []
-        for migrate_out_request in migrate_out_requests:
-            migrate_out_request.is_migrating = True
-            migrate_out_one_request_begin = time.time()
-            logger.info("[LJX] Llumlet._migrate_out_one_request start, {}, timestamps: {}".format(migrate_out_request.request_id, migrate_out_one_request_begin))
-            set_timestamp(migrate_out_request.server_info, "migrate_out_one_request_begin", time.time())
-            tasks.append(self._migrate_out_one_request(migrate_out_request, dst_instance_id, dst_instance_actor_handle))
+    #     tasks = []
+    #     for migrate_out_request in migrate_out_requests:
+    #         migrate_out_request.is_migrating = True
+    #         migrate_out_one_request_begin = time.time()
+    #         logger.info("[LJX] Llumlet._migrate_out_one_request start, {}, timestamps: {}".format(migrate_out_request.request_id, migrate_out_one_request_begin))
+    #         set_timestamp(migrate_out_request.server_info, "migrate_out_one_request_begin", time.time())
+    #         tasks.append(self._migrate_out_one_request(migrate_out_request, dst_instance_id, dst_instance_actor_handle))
 
-        # 并发执行所有迁移
-        results = await asyncio.gather(*tasks)
+    #     # 并发执行所有迁移
+    #     results = await asyncio.gather(*tasks)
 
-        for migrated_request, migrate_out_request in zip(results, migrate_out_requests):
-            migrate_out_one_request_end = time.time()
-            logger.info("[LJX] Llumlet._migrate_out_one_request end, {}, timestamps: {}".format(migrate_out_request.request_id, migrate_out_one_request_end))
-            logger.info("[LJX] Llumlet._migrate_out_one_request latency: {} ms".format((migrate_out_one_request_end - migrate_out_one_request_begin)*1000))
-            migrated_request_list.extend(migrated_request)
-            if len(migrated_request) == 0 and migrate_out_request.eom:
-                break
+    #     for migrated_request, migrate_out_request in zip(results, migrate_out_requests):
+    #         migrate_out_one_request_end = time.time()
+    #         logger.info("[LJX] Llumlet._migrate_out_one_request end, {}, timestamps: {}".format(migrate_out_request.request_id, migrate_out_one_request_end))
+    #         logger.info("[LJX] Llumlet._migrate_out_one_request latency: {} ms".format((migrate_out_one_request_end - migrate_out_one_request_begin)*1000))
+    #         migrated_request_list.extend(migrated_request)
+    #         if len(migrated_request) == 0 and migrate_out_request.eom:
+    #             break
 
-        logger.info("[LJX] Llumlet._migrate_out end, timestamps: {}".format(time.time()))
-        return migrated_request_list
+    #     logger.info("[LJX] Llumlet._migrate_out end, timestamps: {}".format(time.time()))
+    #     return migrated_request_list
 
-    async def _migrate_out_one_request(self,
-                                       migrate_out_request: LlumnixRequest,
-                                       dst_instance_id: str,
-                                       dst_instance_actor_handle: ray.actor.ActorHandle) -> List[LlumnixRequest]:
-        try:
-            t0 = time.time()
-            logger.info("{}->{} begin migrate out".format(self.instance_id, dst_instance_id))
-            migrated_request = []
+    # async def _migrate_out_one_request(self,
+    #                                    migrate_out_request: LlumnixRequest,
+    #                                    dst_instance_id: str,
+    #                                    dst_instance_actor_handle: ray.actor.ActorHandle) -> List[LlumnixRequest]:
+    #     try:
+    #         t0 = time.time()
+    #         logger.info("{}->{} begin migrate out".format(self.instance_id, dst_instance_id))
+    #         migrated_request = []
 
-            if migrate_out_request.status == RequestStatus.RUNNING:
-                migrate_out_request.migration_start_time = time.time()
-                status = await self.migration_coordinator.migrate_out_running_request(dst_instance_actor_handle, migrate_out_request)
-            elif migrate_out_request.status == RequestStatus.WAITING:
-                migrate_out_request.migration_start_time = time.time()
-                status = await self.migration_coordinator.migrate_out_waiting_request(dst_instance_actor_handle, migrate_out_request)
-            else:
-                return migrated_request
+    #         if migrate_out_request.status == RequestStatus.RUNNING:
+    #             migrate_out_request.migration_start_time = time.time()
+    #             status = await self.migration_coordinator.migrate_out_running_request(dst_instance_actor_handle, migrate_out_request)
+    #         elif migrate_out_request.status == RequestStatus.WAITING:
+    #             migrate_out_request.migration_start_time = time.time()
+    #             status = await self.migration_coordinator.migrate_out_waiting_request(dst_instance_actor_handle, migrate_out_request)
+    #         else:
+    #             return migrated_request
 
-            if status == MigrationStatus.FINISHED:
-                set_timestamp(migrate_out_request.server_info, "migrate_out_one_request_end", time.time())
-                await dst_instance_actor_handle.execute_engine_method_async.remote("commit_dst_request", migrate_out_request)
-                self.backend_engine.free_src_request(migrate_out_request)
-                self.backend_engine.pop_migrating_out_request_last_stage(migrate_out_request)
-                migrated_request.append(migrate_out_request.request_id)
-            else: # ABORTED_SRC or ABORTED_DST
-                migrate_out_request.reset_migration_args_src()
-                migrate_out_request.reset_status()
-                # If dst aborts itself, dst proactively frees the pre allocated cache in migrate_in_pre_alloc.
-                if status == MigrationStatus.ABORTED_SRC:
-                    await dst_instance_actor_handle.execute_migration_method.remote("free_dst_pre_alloc_cache", migrate_out_request.request_id)
-            t1 = time.time()
-            logger.info("Instance {}->{} migrate done, migrate request {}, migration status: {}, len: {} blocks, cost: {} ms" \
-                        .format(self.instance_id, dst_instance_id, migrated_request, status, \
-                                sum(migrate_out_request.stage_num_blocks_list), (t1 - t0)*1000))
-        except ray.exceptions.RayActorError:
-            logger.info("Instance {} is dead.".format(dst_instance_id))
-            raise
-        # pylint: disable=W0703
-        except Exception as e:
-            logger.exception("Unexpected exception: {}".format(e))
-            raise
-        return migrated_request
+    #         if status == MigrationStatus.FINISHED:
+    #             set_timestamp(migrate_out_request.server_info, "migrate_out_one_request_end", time.time())
+    #             await dst_instance_actor_handle.execute_engine_method_async.remote("commit_dst_request", migrate_out_request)
+    #             self.backend_engine.free_src_request(migrate_out_request)
+    #             self.backend_engine.pop_migrating_out_request_last_stage(migrate_out_request)
+    #             migrated_request.append(migrate_out_request.request_id)
+    #         else: # ABORTED_SRC or ABORTED_DST
+    #             migrate_out_request.reset_migration_args_src()
+    #             migrate_out_request.reset_status()
+    #             # If dst aborts itself, dst proactively frees the pre allocated cache in migrate_in_pre_alloc.
+    #             if status == MigrationStatus.ABORTED_SRC:
+    #                 await dst_instance_actor_handle.execute_migration_method.remote("free_dst_pre_alloc_cache", migrate_out_request.request_id)
+    #         t1 = time.time()
+    #         logger.info("Instance {}->{} migrate done, migrate request {}, migration status: {}, len: {} blocks, cost: {} ms" \
+    #                     .format(self.instance_id, dst_instance_id, migrated_request, status, \
+    #                             sum(migrate_out_request.stage_num_blocks_list), (t1 - t0)*1000))
+    #     except ray.exceptions.RayActorError:
+    #         logger.info("Instance {} is dead.".format(dst_instance_id))
+    #         raise
+    #     # pylint: disable=W0703
+    #     except Exception as e:
+    #         logger.exception("Unexpected exception: {}".format(e))
+    #         raise
+    #     return migrated_request
 
     # TODO(KuilongCui): only the metrics-related information needs to be synchronously loaded for the manager
     def get_instance_info(self) -> InstanceInfo:
