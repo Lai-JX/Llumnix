@@ -20,22 +20,20 @@ import numpy as np
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
-import ray
 import uvicorn
 
 from vllm.sampling_params import SamplingParams
 
 from llumnix.arg_utils import LlumnixArgumentParser, LaunchArgs
 from llumnix.entrypoints.setup import setup_ray_cluster, setup_llumnix
-from llumnix.entrypoints.vllm.arg_utils import add_cli_args, get_args
+from llumnix.entrypoints.vllm.arg_utils import add_cli_args, get_args, VLLMEngineArgs
 from llumnix.entrypoints.vllm.client import LlumnixClientVLLM
 from llumnix.logging.logger import init_logger
-from llumnix.utils import random_uuid
+from llumnix.utils import random_uuid, BackendType, LaunchMode
 from llumnix.config import get_llumnix_config
-from llumnix.backends.backend_interface import BackendType
-from llumnix.entrypoints.utils import LaunchMode, is_gpu_available
 from llumnix.constants import SERVER_TIMEOUT_KEEP_ALIVE
 from llumnix.metrics.timestamps import set_timestamp
+from llumnix.entrypoints.utils import is_gpu_available
 
 # Code file with __main__ should set the logger name to inherit the llumnix logger configuration.
 logger = init_logger("llumnix.entrypoints.vllm.api_server")
@@ -46,20 +44,29 @@ llumnix_client: LlumnixClientVLLM = None
 # pylint: disable=unused-argument
 @asynccontextmanager
 async def lifespan(fastapi_app: FastAPI):
-    # 启动前操作: 启动输出队列服务
-    asyncio.create_task(llumnix_client.request_output_queue.run_server_loop())
-    asyncio.create_task(llumnix_client.get_request_outputs_loop())
-    yield
-    # 关闭后操作
-    llumnix_client.request_output_queue.cleanup()
-    for instance in llumnix_client.instances.values():
-        try:
-            ray.kill(instance)
-        # pylint: disable=bare-except
-        except:
-            pass
+    try:
+        yield
+    finally:
+        llumnix_client.cleanup()
+
 
 app = FastAPI(lifespan=lifespan)
+
+
+# pylint: disable=unused-argument
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    server_id = llumnix_client.server_info.server_id
+    logger.exception("Server {} caught exception: {}".format(server_id, type(exc).__name__))
+    llumnix_client.cleanup()
+
+    return JSONResponse(
+        status_code=500,
+        content={
+            "error_type": type(exc).__name__,
+            "error": str(exc)
+        }
+    )
 
 
 @app.get("/health")
@@ -162,10 +169,8 @@ async def generate_benchmark(request: Request) -> Response:
 
     if llumnix_client.log_requests:
         llumnix_client.num_finished_requests += 1
-        logger.info("entrypoints finished request {}".format(request_id))
-        logger.info("num_finished_requests {}".format(llumnix_client.num_finished_requests))
-        logger.info("per_token_latency:{}".format(np.array(per_token_latency)[:10,1]))
-    # ignore_migration_latency(per_token_latency)
+        logger.info("Entrypoints finished request {}".format(request_id))
+        logger.info("Entrypoints num_finished_requests: {}".format(llumnix_client.num_finished_requests))
 
     generation = final_output.outputs[0].text
     num_output_tokens = len(final_output.outputs[0].token_ids)
@@ -198,29 +203,36 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int)
     parser.add_argument("--ssl-keyfile", type=str)
     parser.add_argument("--ssl-certfile", type=str)
-    parser.add_argument("--log-level", type=str, choices=["debug", "info", "warning", "error"])
+    parser.add_argument("--server-log-level", type=str, choices=['debug', 'info', 'warning', 'error'])
     parser = add_cli_args(parser)
     cli_args = parser.parse_args()
-    llumnix_config = get_llumnix_config(cli_args.config_file, cli_args)
+    llumnix_config = get_llumnix_config(cli_args.config_file, args=cli_args)
 
     entrypoints_args, manager_args, instance_args, engine_args = get_args(llumnix_config, LaunchMode.LOCAL, parser, cli_args)
     backend_type = BackendType.VLLM if not instance_args.simulator_mode else BackendType.SIM_VLLM
     launch_args = LaunchArgs(launch_mode=LaunchMode.LOCAL, backend_type=backend_type)
+    vllm_engine_args: VLLMEngineArgs = VLLMEngineArgs(engine_args, backend_type)
 
     # Launch or connect to the ray cluster for multi-node serving.
     setup_ray_cluster(entrypoints_args)
 
     # if gpu is not available, it means that this node is head pod without any llumnix components.
     if is_gpu_available():
-        entrypoints_context = setup_llumnix(entrypoints_args, manager_args, instance_args, engine_args, launch_args)
-        llumnix_client = LlumnixClientVLLM(entrypoints_context)
-
+        entrypoints_context = setup_llumnix(entrypoints_args, manager_args, instance_args, vllm_engine_args, launch_args)
         # Start the api server after all the components of llumnix are ready.
-        logger.info("Start api server on '{}:{}'.".format(entrypoints_args.host, entrypoints_args.port))
-        uvicorn.run(app,
-                    host=entrypoints_args.host,
-                    port=entrypoints_args.port,
-                    log_level=entrypoints_args.log_level,
-                    timeout_keep_alive=SERVER_TIMEOUT_KEEP_ALIVE,
-                    ssl_keyfile=entrypoints_args.ssl_keyfile,
-                    ssl_certfile=entrypoints_args.ssl_certfile)
+        loop = asyncio.new_event_loop()
+        llumnix_client = LlumnixClientVLLM(entrypoints_context, loop)
+        asyncio.set_event_loop(loop)
+        config = uvicorn.Config(app,
+            host=entrypoints_args.host,
+            port=entrypoints_args.port,
+            log_level=entrypoints_args.server_log_level,
+            timeout_keep_alive=SERVER_TIMEOUT_KEEP_ALIVE,
+            ssl_keyfile=entrypoints_args.ssl_keyfile,
+            ssl_certfile=entrypoints_args.ssl_certfile
+        )
+        server = uvicorn.Server(config)
+        try:
+            loop.run_until_complete(server.serve())
+        finally:
+            loop.close()

@@ -27,6 +27,9 @@ class GlobalSchedulerConfig:
             scale_up_threshold: float,
             scale_down_threshold: float,
             enable_pd_disagg: bool,
+            enable_engine_pd_disagg: bool,
+            enable_engine_semi_pd_disagg: bool,
+            enable_adaptive_pd: bool,
             is_group_kind_migration_backend: bool) -> None:
         self.initial_instances = initial_instances
         self.dispatch_policy = dispatch_policy
@@ -41,12 +44,16 @@ class GlobalSchedulerConfig:
         self.scale_down_threshold = scale_down_threshold
 
         self.enable_pd_disagg = enable_pd_disagg
+        self.enable_engine_pd_disagg = enable_engine_pd_disagg
+        self.enable_engine_semi_pd_disagg = enable_engine_semi_pd_disagg
+        self.enable_adaptive_pd = enable_adaptive_pd
         self.is_group_kind_migration_backend = is_group_kind_migration_backend
 
 
 class MigrationConfig:
     def __init__(
             self,
+            enable_migration: bool,
             request_migration_policy: str,
             migration_backend: str,
             migration_buffer_blocks: int,
@@ -55,9 +62,9 @@ class MigrationConfig:
             migration_max_stages: int,
             migration_backend_init_timeout: float,
             kvtransfer_migration_backend_transfer_type: str = "",
-            grpc_migration_backend_server_port: int = 50051,
             kvtransfer_migration_backend_naming_url: str = "",
             ) -> None:
+        self.enable_migration = enable_migration
         self.request_migration_policy = request_migration_policy
         self.migration_backend = migration_backend
         self.kvtransfer_migration_backend_transfer_type = kvtransfer_migration_backend_transfer_type
@@ -66,8 +73,10 @@ class MigrationConfig:
         self.migration_last_stage_max_blocks = migration_last_stage_max_blocks
         self.migration_max_stages = migration_max_stages
         self.migration_backend_init_timeout = migration_backend_init_timeout
-        self.grpc_migration_backend_server_port = grpc_migration_backend_server_port
         self.kvtransfer_migration_backend_naming_url = kvtransfer_migration_backend_naming_url
+
+        # lazy init in MigrationLocalWorker constructor
+        self.grpc_migration_server_port: List = None
 
 
 class PDDConfig:
@@ -75,9 +84,14 @@ class PDDConfig:
             self,
             enable_pd_disagg: bool,
             enable_engine_pd_disagg: bool,
+            enable_engine_semi_pd_disagg: bool,
             pd_ratio: Union[str, List[int]],
             enable_pdd_node_affinity_scheduling: bool) -> None:
         self.enable_pd_disagg = enable_pd_disagg
         self.enable_engine_pd_disagg = enable_engine_pd_disagg
+        self.enable_engine_semi_pd_disagg = enable_engine_semi_pd_disagg
         self.pd_ratio = pd_ratio
         self.enable_pdd_node_affinity_scheduling = enable_pdd_node_affinity_scheduling
+
+        assert not (enable_engine_pd_disagg and enable_engine_semi_pd_disagg), \
+            "Cannot enable both engine_pd_disagg and engine_semi_pd"

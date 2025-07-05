@@ -12,24 +12,25 @@
 # limitations under the License.
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict
+from typing import List
 
 from llumnix.logging.logger import init_logger
+from llumnix.metrics.metrics_types import MetricEntry
 
 logger = init_logger(__name__)
 
 
 class Dumper(ABC):
     @abstractmethod
-    def dump(self, metrics: Dict[str, Any]) -> None:
+    def dump(self, metrics: List[MetricEntry]) -> None:
         ...
 
 
 class LoggerDumper(Dumper):
-    def dump(self, metrics: Dict[str, Any]) -> None:
+    def dump(self, metrics: List[MetricEntry]) -> None:
         logger.info("Metrics: {}".format(metrics))
 
 
 class DummyDumper(Dumper):
-    def dump(self, metrics: Dict[str, Any]) -> None:
+    def dump(self, metrics: List[MetricEntry]) -> None:
         pass

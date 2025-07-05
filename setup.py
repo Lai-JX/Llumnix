@@ -11,18 +11,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from setuptools import setup, find_packages
 import os
+import subprocess
 from typing import List
 
+from setuptools import setup, find_packages
+from wheel.bdist_wheel import bdist_wheel
+
 ROOT_DIR = os.path.dirname(__file__)
+
 
 def get_path(*filepath) -> str:
     return os.path.join(ROOT_DIR, 'requirements', *filepath)
 
 def get_requirements(engine: str) -> List[str]:
     """Get Python package dependencies from requirements.txt."""
-    with open(get_path(f"requirements_{engine}.txt")) as f:
+    with open(get_path(f"requirements_{engine}.txt"), encoding="utf-8") as f:
         requirements = f.read().strip().split("\n")
     return requirements
 
@@ -31,10 +35,15 @@ def readme():
         content = f.read()
     return content
 
+class BuildWheelOverride(bdist_wheel):
+    def run(self):
+        subprocess.check_call(['make', 'proto'], cwd=ROOT_DIR)
+        super().run()
+
 setup(
     name='llumnix',
     version='0.0.2',
-    python_requires='>=3.9.0, <3.11',
+    python_requires='>=3.9.0, <=3.12.3',
     description='Efficient and easy multi-instance LLM serving',
     long_description=readme(),
     long_description_content_type="text/markdown",
@@ -45,13 +54,19 @@ setup(
     extras_require={
         'vllm': get_requirements('vllm'),
         'bladellm': get_requirements('bladellm'),
+        'vllm_v1': get_requirements('vllm_v1'),
     },
     platforms=["all"],
     classifiers=[
-          'Programming Language :: Python',
-          'Programming Language :: Python :: 3.9',
-          'Programming Language :: Python :: 3.10',
-          "License :: OSI Approved :: Apache Software License",
-          "Topic :: Scientific/Engineering :: Artificial Intelligence",
-      ],
+        'Programming Language :: Python',
+        'Programming Language :: Python :: 3.9',
+        'Programming Language :: Python :: 3.10',
+        'Programming Language :: Python :: 3.11',
+        'Programming Language :: Python :: 3.12',
+        "License :: OSI Approved :: Apache Software License",
+        "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    ],
+    cmdclass={
+        'bdist_wheel': BuildWheelOverride,
+    }
 )

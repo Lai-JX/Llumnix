@@ -1,34 +1,31 @@
+# Copyright (c) 2024, Alibaba Group;
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+
+# http://www.apache.org/licenses/LICENSE-2.0
+
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import argparse
 
-from llumnix.entrypoints.vllm.arg_utils import add_engine_cli_args, get_engine_args
-from llumnix.utils import save_engine_args
-from llumnix.entrypoints.setup import connect_to_ray_cluster
+from llumnix.arg_utils import RegisterServiceArgs, save_engine_args
+from llumnix.entrypoints.vllm.arg_utils import add_engine_cli_args, get_engine_args, VLLMEngineArgs
 
 # TODO(s5u13b): Add examples for pdd launch.
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-
-    parser.add_argument('--engine-type',
-                        type=str,
-                        choices=['prefill', 'decode', 'no_constraints'],
-                        default='no_constraints',
-                        help="Engine type of the engine arguments. The actual save filename is generated according to "
-                             "the engine type, following the format f\"engine_args_{engine_type}.pkl\".")
-    parser.add_argument('--save-key',
-                        type=str,
-                        help="Save key of the engine arguments. The actual save filepath is generated according to "
-                             "the save path and save key, following the organization f\"{save_path}/{save_key}/\".")
-    parser.add_argument('--save-path',
-                        type=str,
-                        default='.',
-                        help="Save path of the engine arguments.")
+    RegisterServiceArgs.add_cli_args(parser)
 
     parser = add_engine_cli_args(parser)
     cli_args = parser.parse_args()
     engine_args = get_engine_args(cli_args)
+    vllm_engine_args = VLLMEngineArgs(engine_args)
 
-    connect_to_ray_cluster()
-
-    save_engine_args(cli_args.engine_type, cli_args.save_path, engine_args, cli_args.save_key)
+    save_engine_args(cli_args.engine_type, cli_args.save_path, vllm_engine_args, cli_args.save_key)

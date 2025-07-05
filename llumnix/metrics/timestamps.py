@@ -23,7 +23,17 @@ def set_timestamp(obj: Any, timestamp_attr: str, timestamp: float):
         if hasattr(item, "request_timestamps"):
             if hasattr(item.request_timestamps, timestamp_attr):
                 setattr(item.request_timestamps, timestamp_attr, timestamp)
+        elif hasattr(item, timestamp_attr):
+            setattr(item, timestamp_attr, timestamp)
 
+def get_timestamp(item: Any, timestamp_attr: str):
+    if hasattr(item, "request_timestamps") and hasattr(
+        item.request_timestamps, timestamp_attr
+    ):
+        return getattr(item.request_timestamps, timestamp_attr)
+    if hasattr(item, timestamp_attr):
+        return getattr(item, timestamp_attr)
+    return False
 
 @dataclass
 class RequestTimestamps:

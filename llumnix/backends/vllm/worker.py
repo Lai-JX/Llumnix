@@ -19,6 +19,8 @@ import ray
 import torch
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from ray.util.placement_group import PlacementGroup
+import ray.exceptions
+import ray.actor
 
 from vllm.utils import is_pin_memory_available
 from vllm.worker.worker import Worker
@@ -32,7 +34,7 @@ from llumnix.logging.logger import init_logger
 from llumnix.backends.vllm.utils import _sample_with_torch
 from llumnix.backends.vllm.migration_backend import MigrationBackendBase, get_migration_backend
 from llumnix.internal_config import MigrationConfig
-from llumnix.utils import convert_bytes
+from llumnix.utils import convert_bytes, log_worker_exception
 from llumnix.ray_utils import log_actor_ray_info
 
 logger = init_logger(__name__)
@@ -48,7 +50,13 @@ class MigrationWorker(Worker):
         self.migrating_out_seq_group_metadata: Dict[str, Union[SequenceGroupMetadata, SequenceGroupMetadataDelta]] = {}
         self.migrating_in_seq_group_metadata: Dict[str, Union[SequenceGroupMetadata, SequenceGroupMetadataDelta]] = {}
 
+        self.instance_id = None
+        self.rank = None
+
         super().__init__(*args, **kwargs)
+
+    def __repr__(self):
+        return f"{self.__class__.__name__}(iid={self.instance_id[:5]}, rank={self.rank})"
 
     def load_model(self):
         torch.cuda.set_device(self.device)
@@ -60,7 +68,6 @@ class MigrationWorker(Worker):
     def get_global_rank(self):
         return self.global_rank
 
-    # TODO(KuilongCui): Fix it, this function is not be called.
     def reserve_memory_for_migration(self,
                                      migration_config: MigrationConfig,
                                      model_config: ModelConfig,
@@ -92,7 +99,7 @@ class MigrationWorker(Worker):
     def init_migration(self,
                        instance_id: str,
                        migration_config: MigrationConfig,
-                       src_worker_handle_list: List["ray.actor.ActorHandle"],
+                       src_worker_handle_list: List[ray.actor.ActorHandle],
                        placement_group: PlacementGroup) -> None:
         # for proxy actor
         scheduling_strategy = PlacementGroupSchedulingStrategy(
@@ -124,12 +131,12 @@ class MigrationWorker(Worker):
                                                                              use_ray_spmd_worker=self.use_ray_spmd_worker,
                                                                              worker_stage_seq_group_metadata_callback=self._stage_seq_group_metadata)
 
-    def migrate_cache(self,
-                      src_worker_handle_list: List["ray.actor.ActorHandle"],
-                      src_blocks: List[int],
-                      dst_blocks: List[int],
-                      request_id: str,
-                      is_last_stage: bool = False) -> None:
+    def recv_cache(self,
+                   request_id: str,
+                   src_worker_handle_list: List[ray.actor.ActorHandle],
+                   src_blocks: List[int],
+                   dst_blocks: List[int],
+                   is_last_stage: bool = False) -> bool:
         # src_worker_handle = src_worker_handle_list[self.rank]
         # has not consider pipeline parallelism
 
@@ -149,26 +156,23 @@ class MigrationWorker(Worker):
             chunk_size = src_world_size // dst_world_size
             src_worker_handle = src_worker_handle_list[self.rank * chunk_size : (self.rank + 1) * chunk_size]
             logger.info("chunk_size: {}, self.rank:{}".format(chunk_size, self.rank))
-
-        start_time = time.time()
         try:
+            start_time = time.time()
             if add_tp:
-                self.migration_backend.migrate_cache(src_worker_handle, src_blocks, dst_blocks, request_id, is_last_stage,chunk_size=chunk_size, chunk_rank=chunk_rank)
+                self.migration_backend.recv_cache(request_id, src_worker_handle, src_blocks, dst_blocks, is_last_stage,chunk_size=chunk_size, chunk_rank=chunk_rank)
             else:
                 self.migration_backend.migrate_cache_subtract_tp(src_worker_handle, src_blocks, dst_blocks, request_id, is_last_stage,chunk_size=chunk_size)
-        except ray.exceptions.RayActorError:
-            logger.info("rank: {}, src_worker_handle {} is dead".format(self.rank, src_worker_handle))
+            end_time = time.time()
+            total_kv_cache_size = len(src_blocks) * CacheEngine.get_cache_block_size(
+                self.cache_config, self.model_config, self.parallel_config)
+            speed = total_kv_cache_size / GiB_bytes / (end_time - start_time)
+            logger.info("Recv kv cache done, num_blocks: {}, total_kv_cache_size: {}, time: {:.2f}s, speed: {:.5f}GB/s."
+                        .format(len(src_blocks), convert_bytes(total_kv_cache_size), end_time - start_time, speed))
+            return True
         # pylint: disable=broad-except
         except Exception as e:
-            logger.exception("Unexpected exception: {}".format(e))
-            raise
-        end_time = time.time()
-
-        total_kv_cache_size = len(src_blocks) * CacheEngine.get_cache_block_size(
-            self.cache_config, self.model_config, self.parallel_config)
-        speed = total_kv_cache_size/GiB_bytes/(end_time - start_time)
-        logger.info("Migrate kv cache done, blocks_num: {}, total_kv_cache_size: {}, time: {:.2f}s, speed: {:.5f}GB/s."
-                    .format(len(src_blocks), convert_bytes(total_kv_cache_size), end_time-start_time, speed))
+            log_worker_exception(e, self.instance_id, self.rank, "recv_cache", request_id)
+            return False
 
     def do_recv(self, *args, **kwargs):
         return self.migration_backend.do_recv(*args, **kwargs)
@@ -179,8 +183,9 @@ class MigrationWorker(Worker):
         return self.migration_backend.do_send(*args, **kwargs), self._get_seq_group_metadata(request_id)
 
     def _get_seq_group_metadata(self, request_id: str) -> Union[SequenceGroupMetadata, SequenceGroupMetadataDelta]:
+        # Only send sequence group metadata in last stage (blocking migration), so the request id must exist.
         assert request_id in self._seq_group_metadata_cache, \
-            "the request id of running request that migrating out should exist in sequence group metadata cache"
+            f"the request id {request_id} of running request that migrating out should exist in sequence group metadata cache"
         src_seq_group_metadata = self._seq_group_metadata_cache.pop(request_id)
         self._add_migrating_out_seq_group_metadata(request_id, src_seq_group_metadata)
         return src_seq_group_metadata
@@ -191,25 +196,25 @@ class MigrationWorker(Worker):
 
     def commit_seq_group_metadata(self, request_id: str) -> None:
         assert request_id in self.migrating_in_seq_group_metadata, \
-            "the request id of running request that migrating in should exist in migrating in sequence group metadata"
+            f"the request id {request_id} of running request that migrating in should exist in migrating in sequence group metadata"
         self._seq_group_metadata_cache[request_id] = self.migrating_in_seq_group_metadata.pop(request_id)
 
     def _add_migrating_out_seq_group_metadata(self, request_id: str,
             seq_group_metadata: Union[SequenceGroupMetadata, SequenceGroupMetadataDelta]) -> None:
         self.migrating_out_seq_group_metadata[request_id] = seq_group_metadata
 
-    def pop_migrating_out_seq_group_metadata(self, request_id: str) -> None:
-        assert request_id in self.migrating_out_seq_group_metadata, \
-            "the request id of request that migrating out should exist in migrating out sequence group metadata"
-        self.migrating_out_seq_group_metadata.pop(request_id)
+    def pop_migrating_out_seq_group_metadata(self, request_id: str) -> bool:
+        seq_group_metadata = self.migrating_out_seq_group_metadata.pop(request_id, None)
+        return seq_group_metadata is not None
 
     def free_migrating_in_seq_group_metadata(self) -> None:
         self.migrating_in_seq_group_metadata.clear()
 
-    def restore_migrating_out_seq_group_metadata(self) -> None:
-        for request_id, seq_group_metadata in self.migrating_out_seq_group_metadata.items():
+    def restore_migrating_out_seq_group_metadata(self, request_id: str) -> None:
+        seq_group_metadata = self.migrating_out_seq_group_metadata.pop(request_id, None)
+        if seq_group_metadata is not None:
             self._seq_group_metadata_cache[request_id] = seq_group_metadata
-        self.migrating_out_seq_group_metadata.clear()
+        return seq_group_metadata is not None
 
     def _execute_model_spmd(self, execute_model_req: ExecuteModelRequest, *args, **kwargs):
         if execute_model_req is not None:
@@ -255,11 +260,3 @@ class MigrationWorker(Worker):
 
     def warmup(self) -> bool:
         return self.migration_backend.warmup()
-
-    def shutdown(self) -> None:
-        torch.cuda.synchronize()
-        torch.cuda.empty_cache()
-        torch.cuda.reset_max_memory_allocated()
-
-    # async def execute_worker_method_async(self, method, *args, **kwargs):
-    #     return await make_async(self.execute_method)(method, *args, **kwargs)

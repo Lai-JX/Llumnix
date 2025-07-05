@@ -11,27 +11,65 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import gc
 import os
+import random
+import time
 import uuid
 import asyncio
 import threading
-from typing import Any, Callable, Awaitable, TypeVar, Coroutine, Dict, Optional
+from typing import Callable, Awaitable, TypeVar, Coroutine, Dict, Optional, Union, Any
 import socket
 from functools import partial
-import pickle
+import warnings
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+from enum import Enum
 
+import psutil
 from typing_extensions import ParamSpec
+import ray
+import ray.exceptions
 
 from llumnix.logging.logger import init_logger
 from llumnix import envs as llumnix_envs
-from llumnix.constants import MODEL_PATH, DATASET_PATH
+from llumnix.constants import RAY_RPC_TIMEOUT
 
 logger = init_logger(__name__)
+
 
 _MAX_PORT = 65536
 
 P = ParamSpec('P')
 T = TypeVar("T")
+
+RequestIDType = Union[str, int]
+
+
+class BackendType(str, Enum):
+    VLLM = "vLLM"
+    VLLM_V1 = "vLLM v1"
+    BLADELLM = "BladeLLM"
+    SIM_VLLM = "vLLM simulator"
+
+    @staticmethod
+    def is_sim_backend(status: "BackendType") -> bool:
+        return status in [BackendType.SIM_VLLM]
+
+
+# Put it in utils.py to avoid circular import.
+class LaunchMode(str, Enum):
+    LOCAL = "LOCAL"
+    GLOBAL = "GLOBAL"
+
+
+@dataclass
+class MigrationResponse:
+    success: bool = True
+    return_value: Any = None
+
+
+logger = init_logger(__name__)
 
 
 def random_uuid() -> str:
@@ -63,33 +101,6 @@ def run_coroutine_in_new_thread(coro: Coroutine, blocking: bool):
     if blocking:
         thread.join()
 
-def _get_engine_args_filename(engine_type: str) -> str:
-    return f"engine_args_{engine_type}.pkl"
-
-def _get_engine_args_filepath(save_path: str, save_key: str = None) -> str:
-    if save_key is not None:
-        save_filepath = os.path.join(save_path, save_key)
-    else:
-        save_filepath = save_path
-    return save_filepath
-
-def save_engine_args(engine_type: str, save_path: str, engine_args: Any, save_key: str = None) -> None:
-    engine_args_filename = _get_engine_args_filename(engine_type)
-    save_filepath = _get_engine_args_filepath(save_path, save_key)
-    save_filename = os.path.join(save_filepath, engine_args_filename)
-    os.makedirs(save_filepath, exist_ok=True)
-    with open(save_filename, 'wb') as file:
-        pickle.dump(engine_args, file)
-    logger.info("Save engine arguments of {} engine type as file: {}".format(engine_type, save_filename))
-
-def load_engine_args(engine_type: str, load_path: str) -> Any:
-    engine_args_filename = _get_engine_args_filename(engine_type)
-    load_filename = os.path.join(load_path, engine_args_filename)
-    with open(load_filename, 'rb') as file:
-        engine_args =  pickle.load(file)
-    logger.info("Load engine arguments of {} engine type from path: {}".format(engine_type, load_path))
-    return engine_args
-
 def make_async(func: Callable[P, T]) -> Callable[P, Awaitable[T]]:
     """Take a blocking function, and run it on in an executor thread.
 
@@ -119,15 +130,15 @@ def get_service_resouces(service_name: str, num_gpus: int) -> Dict[str, float]:
 def get_llumnix_env_vars():
     llumnix_env_vars = {}
     env_vars = dict(os.environ)
-    llumnix_keys = list(llumnix_envs.environment_variables.keys())
+    llumnix_env_vars_keys = list(llumnix_envs.environment_variables.keys())
     try:
         # pylint: disable=import-outside-toplevel
         from vllm import envs as vllm_envs
-        llumnix_keys.extend(list(vllm_envs.environment_variables.keys()))
+        llumnix_env_vars_keys.extend(list(vllm_envs.environment_variables.keys()))
     except ImportError:
         pass
     for key, value in env_vars.items():
-        if key in llumnix_keys:
+        if key in llumnix_env_vars_keys:
             llumnix_env_vars[key] = value
 
     return llumnix_env_vars
@@ -144,15 +155,45 @@ def get_service_instance_type(service_name: str) -> "InstanceType":
     return instance_type
 
 def get_ip_address():
-    hostname = socket.gethostname()
-    ip_address = socket.gethostbyname(hostname)
-    return ip_address
+    # try ipv4
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))  # Doesn't need to be reachable
+        return s.getsockname()[0]
+    # pylint: disable=broad-except
+    except Exception:
+        pass
+
+    # try ipv6
+    try:
+        s = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+        # Google's public DNS server, see
+        # https://developers.google.com/speed/public-dns/docs/using#addresses
+        s.connect(("2001:4860:4860::8888", 80))  # Doesn't need to be reachable
+        return s.getsockname()[0]
+    # pylint: disable=broad-except
+    except Exception:
+        pass
+
+    try:
+        hostname = socket.gethostname()
+        ip_address = socket.gethostbyname(hostname)
+        return ip_address
+    # pylint: disable=broad-except
+    except Exception:
+        pass
+
+    warnings.warn(
+        "Failed to get the IP address, using 0.0.0.0 by default."
+        "The value can be set by the environment variable"
+        " VLLM_HOST_IP or HOST_IP.",
+        stacklevel=2)
+    return "0.0.0.0"
 
 def _bind_and_close_port(port: Optional[int] = None, host: str = '0.0.0.0') -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         # the SO_REUSEADDR flag tells the kernel to reuse a local socket in TIME_WAIT state,
         # without waiting for its natural timeout to expire. see https://docs.python.org/3/library/socket.html#example
-        # NOTE(qzhong): Is it a risk to reuse old port before closing it?
         # s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         s.bind((host, port or 0))
         return s.getsockname()[1]
@@ -163,12 +204,13 @@ def _get_port_by_pid(pid: int, start: int, end: int) -> int:
     return pid % (end - start) + start
 
 def get_free_port() -> int:
-    # try to find a free port based on pid in each 10000 length segment
-    # to avoid port conflict between multiple processes
+    # try to find a free port based on pid to avoid port conflict between multiple processes
     base_port = os.getpid()
-    for i in range(10000, 60000, 10000):
-        port = _get_port_by_pid(base_port, i, i + 10000)
-        if check_free_port(port=port):
+    for i in range(10000, 60000, 2000):
+        # sleep a random time to avoid port conflict
+        time.sleep(random.randint(1, 1000)/1000)
+        port = _get_port_by_pid(base_port, i, i + 2000)
+        if check_free_port(port=port) and check_free_port(port=port + 1):
             return port
     # fallback to random port if pid based port in all segments are occupied
     return _bind_and_close_port()
@@ -184,21 +226,161 @@ def check_free_port(host='0.0.0.0', port=8081):
         else:
             raise
 
-def try_convert_to_local_path(data_path: str) -> str:
-    if os.path.isabs(data_path):
-        return data_path
+def wait_port_free(port: int, max_retries: int = 5, force: bool = False):
+    retries = 0
+    history_pid = None
 
-    assert "/" in data_path
-    base_data_name = os.path.basename(data_path)
+    while retries < max_retries: # pylint: disable=too-many-nested-blocks
+        if check_free_port(port=port):
+            return
 
-    base_model_path: str = llumnix_envs.MODEL_PATH if llumnix_envs.MODEL_PATH else MODEL_PATH
-    local_model_path: str = os.path.join(base_model_path, base_data_name)
-    if os.path.exists(local_model_path):
-        return local_model_path
+        start_time = time.time()
+        for conn in psutil.net_connections():
+            if conn.laddr.port == port:
+                logger.info("Port {} connection detail: {}".format(port, conn))
+                if conn.pid and history_pid != conn.pid:
+                    history_pid = conn.pid
+                    try:
+                        proc = psutil.Process(conn.pid)
+                        logger.info("Port {} is in use by process {}, status {}: {}.".format(
+                            port, conn.pid, proc.status(), ' '.join(proc.cmdline())))
+                        if force:
+                            proc.kill()
+                            proc.wait(timeout=5)
+                    except psutil.NoSuchProcess:
+                        continue
 
-    base_dataset_path: str = llumnix_envs.DATASET_PATH if llumnix_envs.DATASET_PATH else DATASET_PATH
-    local_dataset_path: str = os.path.join(base_dataset_path, base_data_name)
-    if os.path.exists(local_dataset_path):
-        return local_dataset_path
+                if conn.status == 'TIME_WAIT':
+                    time.sleep(60)
 
-    return data_path
+        gc.collect()
+        time.sleep(3)
+        retries += 1
+
+        cost_time = time.time() - start_time
+        logger.info("Waiting for port {} to be free for {} seconds...".format(port, cost_time))
+
+    raise RuntimeError(f"Port {port} is still in use after {max_retries} retries.")
+
+def update_environment_variables(envs: Dict[str, str]):
+    for k, v in envs.items():
+        if k in os.environ and os.environ[k] != v:
+            logger.warning("Overwriting environment variable {} from '{}' to '{}'".format(k, os.environ[k], v))
+        os.environ[k] = v
+
+def ray_get_with_timeout(object_refs, timeout=RAY_RPC_TIMEOUT):
+    return ray.get(object_refs, timeout=timeout)
+
+def asyncio_wait_for_with_timeout(fut, timeout=RAY_RPC_TIMEOUT):
+    return asyncio.wait_for(fut, timeout=timeout)
+
+async def async_wrapper_for_ray_remote_call(ray_remote_call, *args, **kwargs):
+    return await ray_remote_call(*args, **kwargs)
+
+async def asyncio_wait_for_ray_remote_call_with_timeout(ray_remote_call, *args, timeout=RAY_RPC_TIMEOUT, **kwargs):
+    fut = ray_remote_call(*args, **kwargs)
+    return await asyncio_wait_for_with_timeout(fut, timeout=timeout)
+
+def execute_method_with_timeout(method, timeout, *args, **kwargs):
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(method, *args, **kwargs)
+        try:
+            return future.result(timeout=timeout)
+        except TimeoutError as e:
+            raise TimeoutError(f"Method {method.__name__} timed out after {timeout} seconds") from e
+
+def exception_wrapper_async(func):
+    async def wrapper(*args, **kwargs):
+        try:
+            return await func(*args, **kwargs)
+        # pylint: disable=broad-except
+        except Exception:
+            logger.exception("Error in {}".format(func.__name__))
+    return wrapper
+
+def log_manager_exception(e: Exception, method_name: str, request_id: str = None):
+    if isinstance(e, ray.exceptions.RayActorError):
+        logger.info(
+            "Manager is dead, method_name: {}, request_id: {}\n"
+            "exception type: {}, exception message: {}".format(
+                method_name, request_id, type(e).__name__, e
+            )
+        )
+    elif isinstance(e, asyncio.TimeoutError):
+        logger.error(
+            "Call manager timeout, method_name: {}, request_id: {}\n"
+            "exception type: {}, exception message: {}".format(
+                method_name, request_id, type(e).__name__, e
+            )
+        )
+    elif isinstance(e, ray.exceptions.GetTimeoutError):
+        logger.error(
+            "Call manager timeout, method_name: {}, request_id: {}\n"
+            "exception type: {}, exception message: {}".format(
+                method_name, request_id, type(e).__name__, e
+            )
+        )
+    else:
+        logger.exception(
+            "Error in manager {} (request_id: {})".format(
+                method_name, request_id
+            )
+        )
+
+def log_instance_exception(e: Exception, instance_id: str, method_name: str, request_id: str = None):
+    if isinstance(e, ray.exceptions.RayActorError):
+        logger.info(
+            "Instance {} is dead, method_name: {}, request_id: {}\n"
+            "exception type: {}, exception message: {}".format(
+                instance_id, method_name, request_id, type(e).__name__, e
+            )
+        )
+    elif isinstance(e, asyncio.TimeoutError):
+        logger.error(
+            "Call instance {} timeout, method_name: {}, request_id: {}\n"
+            "exception type: {}, exception message: {}".format(
+                instance_id, method_name, request_id, type(e).__name__, e
+            )
+        )
+    elif isinstance(e, ray.exceptions.GetTimeoutError):
+        logger.error(
+            "Call instance {} timeout, method_name: {}, request_id: {}\n"
+            "exception type: {}, exception message: {}".format(
+                instance_id, method_name, request_id, type(e).__name__, e
+            )
+        )
+    else:
+        logger.exception(
+            "Error in instance {} (instance_id: {}, request_id: {}), exception type: {}, exception message: {}".format(
+                method_name, instance_id, request_id, type(e).__name__, e
+            )
+        )
+
+def log_worker_exception(e: Exception, instance_id: str, rank: str, method_name: str, request_id: str = None):
+    if isinstance(e, ray.exceptions.RayActorError):
+        logger.info(
+            "Worker {} (rank: {}) is dead, method_name: {}, request_id: {}\n"
+            "exception type: {}, exception message: {}".format(
+                instance_id, rank, method_name, request_id, type(e).__name__, e
+            )
+        )
+    elif isinstance(e, asyncio.TimeoutError):
+        logger.error(
+            "Call worker {} (rank: {}) timeout, method_name: {}, request_id: {}\n"
+            "exception type: {}, exception message: {}".format(
+                instance_id, rank, method_name, request_id, type(e).__name__, e
+            )
+        )
+    elif isinstance(e, ray.exceptions.GetTimeoutError):
+        logger.error(
+            "Call worker {} (rank: {}) timeout, method_name: {}, request_id: {}\n"
+            "exception type: {}, exception message: {}".format(
+                instance_id, rank, method_name, request_id, type(e).__name__, e
+            )
+        )
+    else:
+        logger.exception(
+            "Error in worker {} (instance_id: {}, rank: {}, request_id: {})".format(
+                method_name, instance_id, rank, request_id,
+            )
+        )

@@ -22,17 +22,19 @@ from vllm.engine.arg_utils import EngineArgs
 
 from llumnix.backends.vllm.worker import MigrationWorker
 from llumnix.arg_utils import InstanceArgs
-from llumnix.utils import random_uuid, try_convert_to_local_path
+from llumnix.utils import random_uuid
 from llumnix.ray_utils import initialize_placement_group, get_placement_group_name
 
 # pylint: disable=unused-import
 from tests.conftest import ray_env
+from tests.utils import try_convert_to_local_path
+
 from .test_worker import create_worker
 
 
 class MockMigrationWorker(MigrationWorker):
     def __init__(self, *args, **kwargs):
-        # Set 'VLLM_USE_RAY_SPMD_WORKER' to True and therefore, once is_last_stage of migrate_cache is True,
+        # Set 'VLLM_USE_RAY_SPMD_WORKER' to True and therefore, once is_last_stage of recv_cache is True,
         # send_worker_metadata of do_send will be True.
         os.environ["VLLM_USE_RAY_SPMD_WORKER"] = "1"
         super().__init__(*args, **kwargs)
@@ -124,7 +126,7 @@ def test_migrate_cache(ray_env, backend, send_worker_metadata):
     random.shuffle(dst_blocks)
     src_to_dst = dict(enumerate(dst_blocks))
     ray.get(worker1.execute_method.remote(
-        'migrate_cache',
+        'recv_cache',
         src_worker_handle_list=[worker0],
         src_blocks=list(src_to_dst.keys()),
         dst_blocks=list(src_to_dst.values()),

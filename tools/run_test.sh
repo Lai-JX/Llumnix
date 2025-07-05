@@ -6,11 +6,11 @@ set -ex
 if [[ "$test_mode" == *"vllm"* ]]; then
     image="registry.cn-beijing.aliyuncs.com/llumnix/llumnix-vllm-dev:202504241348_image_54729fe"
     install_command="make vllm_install"
-    docker_options="--net host --ipc host"
+    docker_options=""
 elif [[ "$test_mode" == *"bladellm"* ]]; then
-    image="registry.cn-beijing.aliyuncs.com/llumnix/llumnix-bladellm-dev:202504251128_image_5dc1604"
+    image="registry.cn-beijing.aliyuncs.com/llumnix/llumnix-bladellm-dev:202506261954_rebase_bladellm_0624_6efc1e8"
     install_command="make bladellm_install"
-    docker_options="--net host --ipc host --device=/dev/infiniband/uverbs0 --device=/dev/infiniband/uverbs1 --device=/dev/infiniband/rdma_cm --ulimit memlock=-1"
+    docker_options="--device=/dev/infiniband/uverbs0 --device=/dev/infiniband/uverbs1 --device=/dev/infiniband/rdma_cm --ulimit memlock=-1"
 else
     echo "Error: Invalid test_mode '$test_mode'."
     exit 1
@@ -21,4 +21,5 @@ nvidia-docker run --rm -t \
   -v /mnt:/mnt \
   -w /test_workspace \
   $docker_options \
-  "$image" sh -c "$install_command > /dev/null && make $test_mode"
+  --shm-size=24g \
+  "$image" sh -c "date && $install_command > /dev/null && date && make $test_mode"

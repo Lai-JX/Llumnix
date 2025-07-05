@@ -17,17 +17,21 @@ import asyncio
 import queue
 from typing import List, Dict
 
+import ray.actor
 from ray.util.placement_group import PlacementGroup
 
 from vllm.engine.arg_utils import EngineArgs
 from vllm import envs as vllm_envs
 
+from llumnix.arg_utils import InstanceArgs, LlumnixEngineArgs
 from llumnix.logging.logger import init_logger
 from llumnix.internal_config import MigrationConfig
+from llumnix.backends.utils import EngineState
 from llumnix.backends.vllm.scheduler import SchedulerLlumnix
-from llumnix.backends.vllm.llm_engine import LLMEngineLlumnix, BackendVLLM, EngineState
+from llumnix.backends.vllm.llm_engine import LLMEngineLlumnix, BackendVLLM
 from llumnix.backends.profiling import ProfilingDatabase, LatencyMemData, ProfilingResult, SimParallelConfig
 from llumnix.queue.queue_type import QueueType
+from llumnix.utils import BackendType
 
 logger = init_logger(__name__)
 
@@ -39,19 +43,26 @@ class BackendSimVLLM(BackendVLLM):
         instance_id: str,
         placement_group: PlacementGroup,
         request_output_queue_type: QueueType,
-        migration_config: MigrationConfig,
-        engine_args: EngineArgs,
-        profiling_result_file_path: str
+        instance_args: InstanceArgs,
+        llumnix_engine_args: LlumnixEngineArgs
     ) -> None:
         # multi-instance args
-        self.migration_config = migration_config
+        self.engine_disagg_inst_id = instance_id
+        engine_args = llumnix_engine_args.load_engine_args()
+        self.migration_config: MigrationConfig = instance_args.create_migration_config()
+        profiling_result_file_path = instance_args.profiling_result_file_path
         latency_mem = self._get_lantecy_mem(profiling_result_file_path, engine_args)
-        self.engine: LLMEngineLlumnix = LLMEngineLlumnix.from_engine_args(engine_args=engine_args,
-                                                                          request_output_queue_type=request_output_queue_type,
-                                                                          migration_config=migration_config,
-                                                                          instance_id=instance_id,
-                                                                          placement_group=placement_group,
-                                                                          latency_mem=latency_mem)
+        self.engine: LLMEngineLlumnix = LLMEngineLlumnix.from_engine_args(
+            engine_args=engine_args,
+            request_output_queue_type=request_output_queue_type,
+            migration_config=self.migration_config,
+            instance_id=instance_id,
+            placement_group=placement_group,
+            backend_type=BackendType.SIM_VLLM,
+            request_output_forwarding_mode=instance_args.request_output_forwarding_mode,
+            abort_request_callback=self.abort_request,
+            latency_mem=latency_mem
+        )
         self.engine.scheduler = [SchedulerLlumnix(self.engine.scheduler_config, self.engine.cache_config, self.engine.lora_config)
                                  for _ in range(engine_args.pipeline_parallel_size)]
         for vid in range(engine_args.pipeline_parallel_size):
@@ -60,7 +71,7 @@ class BackendSimVLLM(BackendVLLM):
         self.instance_id = instance_id
 
         self.state = EngineState.INIT
-        logger.info("engine ({}) current state {}".format(self.instance_id, self.state))
+        logger.info("engine {} current state: {}".format(self.instance_id, self.state))
 
         self.disable_async_output_proc = engine_args.disable_async_output_proc
 
@@ -93,10 +104,11 @@ class BackendSimVLLM(BackendVLLM):
         return latency_mem
 
     # pylint: disable=unused-argument
-    async def send_blocks(self,
-                          dst_ray_actor: "ray.actor.ActorHandle",
-                          src_blocks: List[int],
-                          dst_blocks: List[int],
-                          request_id: str,
-                          is_last_stage: bool) -> None:
-        await self.engine.model_executor.send_blocks(len(src_blocks))
+    async def send_cache(self,
+                         dst_instance_actor: ray.actor.ActorHandle,
+                         src_blocks: List[int],
+                         dst_blocks: List[int],
+                         request_id: str,
+                         is_last_stage: bool) -> bool:
+        await self.engine.model_executor.send_cache(len(src_blocks))
+        return True

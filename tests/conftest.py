@@ -25,22 +25,45 @@ from ray._private.utils import hex_to_binary
 import pytest
 
 from llumnix.utils import random_uuid
+from llumnix.utils import get_ip_address
+
+from tests.e2e_test.utils import shutdown_llumnix_service_func
 
 
 def ray_start():
     for _ in range(5):
-        subprocess.run(["ray", "stop"], check=False, stdout=subprocess.DEVNULL)
+        ray_stop()
         subprocess.run(["ray", "start", "--head", "--port=6379"], check=False, stdout=subprocess.DEVNULL)
         time.sleep(5.0)
         result = subprocess.run(["ray", "status"], check=False, capture_output=True, text=True)
         if result.returncode == 0:
             return
-        print("Ray start failed, exception: {}".format(result.stderr.strip()))
+        print("Ray start failed, exception: {}.".format(result.stderr.strip()))
         time.sleep(3.0)
     raise Exception("Ray start failed after 5 attempts.")
 
-def ray_stop():
-    subprocess.run(["ray", "stop"], check=False, stdout=subprocess.DEVNULL)
+def ray_stop(max_retries=5, delay=5):
+    def is_ray_running():
+        result = subprocess.run(["ps", "-ef"], stdout=subprocess.PIPE, text=True, check=False)
+        lines = [line for line in result.stdout.splitlines() if
+                 'ray' in line and 'rayqueue' not in line and 'rayrpc' not in line
+                 and 'use_ray_spmd_worker' not in line]
+        if len(lines) > 0:
+            print("Ray processes are still running: {}".format('\n'.join(lines)))
+        return len(lines) > 0
+
+    attempt = 0
+    while attempt <= max_retries:
+        subprocess.run(["ray", "stop", "--force"], check=False, stdout=subprocess.DEVNULL)
+        if not is_ray_running():
+            print("Ray has been successfully stopped.")
+            return
+
+        attempt += 1
+        print("Ray processes still running. Retry after {} second(s)...".format(delay))
+        time.sleep(delay)
+
+    print("Failed to stop Ray processes after maximum retries {}.".format(max_retries))
 
 def cleanup_ray_env_func():
     actor_infos = list_named_actors(True)
@@ -69,21 +92,31 @@ def cleanup_ray_env_func():
         ray.shutdown()
     # pylint: disable=broad-except
     except Exception as e:
-        print("ray shutdown error: ", e)
+        print("Ray shutdown error: {}".format(e))
 
-    time.sleep(5.0)
+    time.sleep(3.0)
 
 def pytest_sessionstart(session):
     ray_start()
 
 def pytest_sessionfinish(session):
+    cleanup_ray_env_func()
     ray_stop()
+    shutdown_llumnix_service_func()
+
+
+SKIP_REASON: str = None
 
 @pytest.fixture
 def ray_env():
-    ray.init(ignore_reinit_error=True, namespace="llumnix")
-    yield
-    cleanup_ray_env_func()
+    global SKIP_REASON
+    try:
+        ray.init(ignore_reinit_error=True, namespace="llumnix")
+        SKIP_REASON = None
+        yield
+    finally:
+        if SKIP_REASON is None or len(SKIP_REASON) == 0:
+            cleanup_ray_env_func()
 
 def backup_error_log(func_name):
     curr_time = datetime.now().strftime('%Y_%m_%d_%H_%M_%S')
@@ -109,7 +142,7 @@ def backup_error_log(func_name):
     with open(file_path, 'w', encoding='utf-8') as file:
         file.write(f'{func_name}')
 
-    print(f"Backup error instance log to directory {dst_dir}")
+    print(f"Backup error instance log to directory {dst_dir}, host: {get_ip_address()}")
 
 @pytest.hookimpl(tryfirst=True, hookwrapper=True)
 def pytest_runtest_makereport(item, call):

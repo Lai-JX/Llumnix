@@ -13,8 +13,21 @@
 
 import os
 from typing import TYPE_CHECKING, Any, Callable, Dict, Optional
+from llumnix.constants import (
+    SERVER_READY_TIMEOUT,
+    INSTANCE_READY_TIMEOUT,
+    DATASET_PATH,
+    MODEL_PATH,
+    BLOCKDEMANDFACTOR_BUSY_THRESHOLD,
+    REMAININGSTEPS_BUSY_THRESHOLD,
+    DECODE_COMPUTE_BOUND_BATCH_SIZE,
+    DEFAULT_METRICS_EXPORT_INTERVAL_SEC,
+    RAY_TASK_RETRY_DELAY_MS
+)
 
 if TYPE_CHECKING:
+    HEAD_NODE: Optional[str] = None
+    HEAD_NODE_IP: Optional[str] = None
     LLUMNIX_CONFIGURE_LOGGING: int = 1
     LLUMNIX_LOGGING_CONFIG_PATH: Optional[str] = None
     LLUMNIX_LOGGING_LEVEL: str = "INFO"
@@ -23,10 +36,27 @@ if TYPE_CHECKING:
     LLUMNIX_LOG_NODE_PATH: str = ""
     MODEL_PATH: str = ""
     DATASET_PATH: str = ""
+    METRICS_OUTPUT_TARGET:  str = "logger,eas"
+
+    # 'XXX_METRICS_SAMPLE_EVERY_N_RECORDS = n' means that for every n observe, only one will be actually executed
+    MANAGER_METRICS_SAMPLE_EVERY_N_RECORDS:  str = "1"
+    GLOBAL_SCHEDULER_METRICS_SAMPLE_EVERY_N_RECORDS:  str = "1"
+    LLUMNIX_CLIENT_METRICS_SAMPLE_EVERY_N_RECORDS:  str = "1"
+    LLUMLET_METRICS_SAMPLE_EVERY_N_RECORDS: str = "1"
+    QUEUE_SERVER_METRICS_SAMPLE_EVERY_N_RECORDS: str = "1"
+    LLUMNIX_METRICS_EXPORT_INTERVAL_SEC: str = "15"
+    BLOCKDEMANDFACTOR_BUSY_THRESHOLD: float = 0.0
+    REMAININGSTEPS_BUSY_THRESHOLD: float = 0.0
+    DECODE_COMPUTE_BOUND_BATCH_SIZE: float = 0.0
+
 
 
 environment_variables: Dict[str, Callable[[], Any]] = {
     # ================== Llumnix environment variables ==================
+
+    # Ray cluster setup configuration
+    "HEAD_NODE": lambda: os.getenv("HEAD_NODE"),
+    "HEAD_NODE_IP": lambda: os.getenv("HEAD_NODE_IP"),
 
     # Logging configuration
     # If set to 0, llumnix will not configure logging
@@ -53,9 +83,43 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     lambda: os.getenv("LLUMNIX_LOG_NODE_PATH", ""),
 
     "MODEL_PATH":
-    lambda: os.getenv("MODEL_PATH", ""),
+    lambda: os.getenv("MODEL_PATH", MODEL_PATH),
     "DATASET_PATH":
-    lambda: os.getenv("DATASET_PATH", ""),
+    lambda: os.getenv("DATASET_PATH", DATASET_PATH),
+
+    # used in scale up
+    "SERVER_READY_TIMEOUT":
+    lambda: os.getenv("LLUMNIX_SERVER_READY_TIMEOUT", str(SERVER_READY_TIMEOUT)),
+    "INSTANCE_READY_TIMEOUT":
+    lambda: os.getenv("LLUMNIX_INSTANCE_READY_TIMEOUT", str(INSTANCE_READY_TIMEOUT)),
+
+    # metrics envs
+    "METRICS_OUTPUT_TARGET":
+    lambda: os.getenv("LLUMNIX_METRICS_OUTPUT_TARGET", ""),
+    "MANAGER_METRICS_SAMPLE_EVERY_N_RECORDS":
+    lambda: os.getenv("LLUMNIX_MANAGER_METRICS_SAMPLE_EVERY_N_RECORDS", "0"),
+    "LLUMNIX_CLIENT_METRICS_SAMPLE_EVERY_N_RECORDS":
+    lambda: os.getenv("LLUMNIX_CLIENT_METRICS_SAMPLE_EVERY_N_RECORDS", "0"),
+    "LLUMLET_METRICS_SAMPLE_EVERY_N_RECORDS":
+    lambda: os.getenv("LLUMNIX_LLUMLET_METRICS_SAMPLE_EVERY_N_RECORDS", "0"),
+    "GLOBAL_SCHEDULER_METRICS_SAMPLE_EVERY_N_RECORDS":
+    lambda: os.getenv("LLUMNIX_GLOBAL_SCHEDULER_METRICS_SAMPLE_EVERY_N_RECORDS", "0"),
+    "QUEUE_SERVER_METRICS_SAMPLE_EVERY_N_RECORDS":
+    lambda: os.getenv("LLUMNIX_QUEUE_SERVER_METRICS_SAMPLE_EVERY_N_RECORDS", "0"),
+    "LLUMNIX_METRICS_EXPORT_INTERVAL_SEC":
+    lambda: os.getenv("LLUMNIX_METRICS_EXPORT_INTERVAL_SEC", str(DEFAULT_METRICS_EXPORT_INTERVAL_SEC)),
+
+    # used for load computation
+    "BLOCKDEMANDFACTOR_BUSY_THRESHOLD":
+    lambda: os.getenv("BLOCKDEMANDFACTOR_BUSY_THRESHOLD", str(BLOCKDEMANDFACTOR_BUSY_THRESHOLD)),
+    "REMAININGSTEPS_BUSY_THRESHOLD":
+    lambda: os.getenv("REMAININGSTEPS_BUSY_THRESHOLD", str(REMAININGSTEPS_BUSY_THRESHOLD)),
+    "DECODE_COMPUTE_BOUND_BATCH_SIZE":
+    lambda: os.getenv("DECODE_COMPUTE_BOUND_BATCH_SIZE", str(DECODE_COMPUTE_BOUND_BATCH_SIZE)),
+
+    # used in retry manager and scaler method
+    "RAY_TASK_RETRY_DELAY_MS":
+    lambda: os.getenv("RAY_TASK_RETRY_DELAY_MS", str(RAY_TASK_RETRY_DELAY_MS)),
 }
 
 

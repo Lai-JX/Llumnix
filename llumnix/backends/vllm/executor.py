@@ -13,23 +13,25 @@
 
 import time
 from collections import defaultdict
-from typing import Callable, Dict, List, Optional, Tuple, Type
+from itertools import islice, repeat
+from typing import Callable, Dict, List, Optional, Tuple, Type, Any
 
 import ray
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 # pylint: disable=unused-import
 from ray.util.placement_group import PlacementGroup
 
-from vllm.executor.ray_gpu_executor import RayGPUExecutorAsync, RayWorkerWrapper, envs, \
-                                           get_ip, get_vllm_instance_id, get_distributed_init_method, get_open_port
+from vllm.executor.ray_gpu_executor import (RayGPUExecutorAsync, RayWorkerWrapper, envs,
+                                            get_ip, get_vllm_instance_id, get_distributed_init_method, get_open_port)
 from vllm.worker.worker_base import WorkerBase
-
 from vllm.sequence import ExecuteModelRequest
 from vllm.model_executor.layers.sampler import SamplerOutput
 
 from llumnix.internal_config import MigrationConfig
 from llumnix.logging.logger import init_logger
-from llumnix.utils import random_uuid
+from llumnix.utils import random_uuid, ray_get_with_timeout
+from llumnix.constants import NUM_GPUS_VLLM_GPU_ACTOR
+import llumnix.envs as llumnix_envs
 
 logger = init_logger(__name__)
 
@@ -41,14 +43,6 @@ class LlumnixRayGPUExecutor(RayGPUExecutorAsync):
 
     def _init_workers_ray(self, placement_group: PlacementGroup,
                           **ray_remote_kwargs):
-        if (self.parallel_config.tensor_parallel_size == 1
-                and self.parallel_config.pipeline_parallel_size == 1):
-            # For single GPU case, we use a ray worker with constrained memory.
-            num_gpus = self.cache_config.gpu_memory_utilization
-        else:
-            # Otherwise, the ray workers are allocated with a full GPU.
-            num_gpus = 1
-
         # The driver dummy worker does not actually use any resources.
         # It holds the resource for the driver worker.
         self.driver_dummy_worker: Optional[RayWorkerWrapper] = None
@@ -74,29 +68,26 @@ class LlumnixRayGPUExecutor(RayGPUExecutorAsync):
                 continue
             if not bundle.get("GPU", 0):
                 raise Exception("GPU resource cannot be 0.")
-            # The Llumlet and worker shares the same 1 gpu in the first bundle of PlacementGroup.
-            if bundle_id == 0:
-                num_gpus = 0.5
+            num_gpus = NUM_GPUS_VLLM_GPU_ACTOR if bundle_id == 0 else 1
             scheduling_strategy = PlacementGroupSchedulingStrategy(
                 placement_group=placement_group,
                 placement_group_capture_child_tasks=True,
                 placement_group_bundle_index=bundle_id
             )
-
             worker = ray.remote(
                 num_cpus=0,
                 num_gpus=num_gpus,
                 scheduling_strategy=scheduling_strategy,
                 max_concurrency=2,
                 concurrency_groups={"migate": 8, },
-                name=f"RayWorkerWrapper_{self.instance_id}_"+random_uuid(),
+                name=f"worker_{self.instance_id}_{random_uuid()}",
                 **ray_remote_kwargs,
             )(RayWorkerWrapper).remote(**worker_wrapper_kwargs)
 
             if self.use_ray_spmd_worker:
                 self.workers.append(worker)
             else:
-                worker_ip = ray.get(worker.get_node_ip.remote())
+                worker_ip = ray_get_with_timeout(worker.get_node_ip.remote())
                 if worker_ip == driver_ip and self.driver_dummy_worker is None:
                     # If the worker is on the same node as the driver, we use it
                     # as the resource holder for the driver process.
@@ -116,7 +107,7 @@ class LlumnixRayGPUExecutor(RayGPUExecutorAsync):
                 "GPU node.")
 
         worker_ips = [
-            ray.get(worker.get_node_ip.remote())  # type: ignore[attr-defined]
+            ray_get_with_timeout(worker.get_node_ip.remote())  # type: ignore[attr-defined]
             for worker in self.workers
         ]
         ip_counts: Dict[str, int] = {}
@@ -133,7 +124,7 @@ class LlumnixRayGPUExecutor(RayGPUExecutorAsync):
             3. Finally, if the work is on a node with smaller IP address, it
                 should be placed first.
             """
-            ip = ray.get(worker.get_node_ip.remote())
+            ip = ray_get_with_timeout(worker.get_node_ip.remote())
             return (ip != driver_ip, ip_counts[ip], ip)
 
         # After sorting, the workers on the same node will be
@@ -168,7 +159,7 @@ class LlumnixRayGPUExecutor(RayGPUExecutorAsync):
             raise RuntimeError(
                 f"Every node should have a unique IP address. Got {n_nodes}"
                 f" nodes with node ids {list(node_workers.keys())} and "
-                f"{n_ips} unique IP addresses {all_ips}. Please check your"
+                f"{n_ips} unique IP addresses {all_ips}. please check the cause your"
                 " network configuration. If you set `VLLM_HOST_IP` or "
                 "`HOST_IP` environment variable, make sure it is unique for"
                 " each node.")
@@ -222,6 +213,12 @@ class LlumnixRayGPUExecutor(RayGPUExecutorAsync):
         self._run_workers("load_model",
                           max_concurrent_workers=self.parallel_config.
                           max_parallel_loading_workers)
+        if self.migration_config and self.migration_config.enable_migration:
+            self._run_workers("reserve_memory_for_migration",
+                              migration_config=self.migration_config,
+                              model_config=self.model_config,
+                              cache_config=self.cache_config,
+                              parallel_config=self.parallel_config)
 
         if self.use_ray_spmd_worker:
             for pp_rank in range(self.parallel_config.pipeline_parallel_size):
@@ -253,6 +250,96 @@ class LlumnixRayGPUExecutor(RayGPUExecutorAsync):
                 self.tp_driver_workers.append(worker)
             else:
                 self.non_driver_workers.append(worker)
+
+    # pylint: disable=arguments-differ
+    def _run_workers(
+        self,
+        method: str,
+        *args,
+        async_run_tensor_parallel_workers_only: bool = False,
+        all_args: Optional[List[Tuple[Any, ...]]] = None,
+        all_kwargs: Optional[List[Dict[str, Any]]] = None,
+        use_dummy_driver: bool = False,
+        max_concurrent_workers: Optional[int] = None,
+        timeout: float = float(llumnix_envs.INSTANCE_READY_TIMEOUT),
+        **kwargs,
+    ) -> Any:
+        """Runs the given method on all workers. Can be used in the following
+        ways:
+
+        Args:
+        - async_run_tensor_parallel_workers_only: If True the method will be
+          run only in the remote TP workers, not the driver worker.
+          It will also be run asynchronously and return a list of futures
+          rather than blocking on the results.
+        - args/kwargs: All workers share the same args/kwargs
+        - all_args/all_kwargs: args/kwargs for each worker are specified
+          individually
+        """
+        if self.use_ray_spmd_worker:
+            assert not async_run_tensor_parallel_workers_only, (
+                "async_run_tensor_parallel_workers_only is not supported for "
+                "spmd mode.")
+
+        if max_concurrent_workers:
+            raise NotImplementedError(
+                "max_concurrent_workers is not supported yet.")
+
+        count = len(self.workers) if not \
+            async_run_tensor_parallel_workers_only \
+            else len(self.non_driver_workers)
+        # If using SPMD worker, all workers are the same, so we should execute
+        # the args on all workers. Otherwise, we skip the first worker's args
+        # because those args will go to the driver worker.
+        first_worker_args_index: int = 0 if self.use_ray_spmd_worker else 1
+        all_worker_args = repeat(args, count) if all_args is None \
+            else islice(all_args, first_worker_args_index, None)
+        all_worker_kwargs = repeat(kwargs, count) if all_kwargs is None \
+            else islice(all_kwargs, first_worker_args_index, None)
+
+        # Start the ray workers first.
+        ray_workers = self.workers
+        if async_run_tensor_parallel_workers_only:
+            ray_workers = self.non_driver_workers
+        ray_worker_outputs = [
+            worker.execute_method.remote(method, *worker_args, **worker_kwargs)
+            for (worker, worker_args, worker_kwargs
+                 ) in zip(ray_workers, all_worker_args, all_worker_kwargs)
+        ]
+
+        # TODO(s5u13b): Check it.
+        if async_run_tensor_parallel_workers_only:
+            # Just return futures
+            return ray_worker_outputs
+
+        driver_worker_output = []
+        # In SPMD mode, the driver worker is the same as any other worker,
+        # so we only explicitly execute on the driver worker if using a
+        # non-SPMD worker class.
+        if not self.use_ray_spmd_worker:
+            driver_args = args if all_args is None else all_args[0]
+            driver_kwargs = kwargs if all_kwargs is None else all_kwargs[0]
+
+            # Start the driver worker after all the ray workers.
+            if not use_dummy_driver:
+                driver_worker_output = [
+                    self.driver_worker.execute_method(method, *driver_args,
+                                                      **driver_kwargs)
+                ]
+            else:
+                assert self.driver_dummy_worker is not None
+                driver_worker_output = [
+                    ray.get(
+                        self.driver_dummy_worker.execute_method.remote(
+                            method, *driver_args, **driver_kwargs),
+                        timeout=timeout)
+                ]
+
+        # Get the results of the ray workers.
+        if self.workers:
+            ray_worker_outputs = ray.get(ray_worker_outputs, timeout=timeout)
+
+        return driver_worker_output + ray_worker_outputs
 
     def _get_worker_module_and_class(
             self) -> Tuple[str, str, Optional[Callable[[], Type[WorkerBase]]]]:

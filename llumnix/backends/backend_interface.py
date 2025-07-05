@@ -12,40 +12,34 @@
 # limitations under the License.
 
 from abc import ABC, abstractmethod
-from enum import Enum
-from typing import Iterable, List, Union, Deque, Tuple
+from typing import Iterable, List, Union, Deque, Tuple, Any
+
+import ray.actor
 
 from llumnix.llumlet.request import LlumnixRequest, RequestStatus
 from llumnix.server_info import ServerInfo
-
-
-class EngineState(str, Enum):
-    INIT = "INIT"
-    CRASHED = "CRASHED"
-    RUNNING = "RUNNING"
-    STOPPED = "STOPPED"
-
-
-class BackendType(str, Enum):
-    VLLM = "vLLM"
-    BLADELLM = "BladeLLM"
-    SIM_VLLM = "vLLM simulator"
-
-    @staticmethod
-    def is_sim_backend(status: "BackendType") -> bool:
-        return status in [BackendType.SIM_VLLM]
+from llumnix.utils import RequestIDType, MigrationResponse
+from llumnix.constants import RAY_RPC_TIMEOUT
+from llumnix.instance_info import InstanceInfo
 
 
 class BackendInterface(ABC):
     @abstractmethod
+    def stop(self):
+        """ Stop backend engine."""
+        raise NotImplementedError
+
+    @abstractmethod
     async def is_ready(self):
+        """ Get if backend engine ready."""
         raise NotImplementedError
 
     # Methods for inference
     @abstractmethod
-    async def add_request(self, request_id: str, server_info: ServerInfo, expected_steps: int,
-                    *args, **kwargs) -> None:
-        """Add a new inference request to the backend.
+    async def add_request(self, request_id: RequestIDType, server_info: ServerInfo, expected_steps: int,
+                          *args, **kwargs) -> None:
+        """
+        Add a new inference request to the backend.
 
         This method should capture all necessary metadata of an inference request
         such as request ID, arrival time, and any other related information.
@@ -65,8 +59,9 @@ class BackendInterface(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def abort_request(self, request_id: Union[str, Iterable[str]]) -> None:
-        """Abort one or multiple requests of the backend.
+    async def abort_request(self, request_id: Union[RequestIDType, Iterable[RequestIDType]]) -> None:
+        """
+        Abort one or multiple requests of the backend.
 
         Args:
             request_id: A request ID or an iterable of request IDs to abort.
@@ -74,8 +69,11 @@ class BackendInterface(ABC):
         raise NotImplementedError
 
     # Methods for migration
-    async def get_request_incremental_blocks(self, backend_request: LlumnixRequest, pre_stage_num_blocks: int) -> Tuple[List[int], List[int]]:
-        """Get the incremental blocks and token ids for a given request.
+    async def get_request_incremental_blocks(self,
+                                             backend_request: LlumnixRequest,
+                                             pre_stage_num_blocks: int) -> Tuple[List[int], List[int]]:
+        """
+        Get the incremental blocks and token ids for a given request.
 
         This method is used to fetch a list of block numbers and a list of token ids that represent the
         incremental data associated with a particular backend request. It is typically called during a
@@ -109,7 +107,7 @@ class BackendInterface(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    async def remove_running_request(self, request_id: str) -> bool:
+    async def remove_running_request(self, request_id: RequestIDType) -> bool:
         """
         Remove a request from the running queue of backend.
 
@@ -126,7 +124,7 @@ class BackendInterface(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def remove_waiting_request(self, request_id: str) -> bool:
+    def remove_waiting_request(self, request_id: RequestIDType) -> bool:
         """
         Remove a request from the waiting queue of backend.
 
@@ -169,26 +167,14 @@ class BackendInterface(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def free_migrating_out_requests_last_stage(self) -> List[LlumnixRequest]:
+    def pre_alloc_cache(self,
+                        request_id: RequestIDType,
+                        request_status: RequestStatus,
+                        request_arrival_time: float,
+                        block_num: int,
+                        token_ids: List[int]) -> MigrationResponse:
         """
-        Pop the list of migrating out requests in last stage.
-
-        This method pops the list of migrating out requests in last stage. This action is performed
-        to free migrating out requests in last stage when the migration encounters exception.
-
-        Returns:
-            The list of migrating out requests in last stage.
-        """
-        raise NotImplementedError
-
-    @abstractmethod
-    def pre_alloc(self,
-                  request_id: str,
-                  request_status: RequestStatus,
-                  request_arrival_time: float,
-                  block_num: int,
-                  token_ids: List[int]) -> List[int]:
-        """Pre-allocate cache blocks for a migrating request.
+        Pre-allocate cache blocks for a migrating request.
 
         This method selects a specified number of free cache blocks to be reserved for an incoming
         migration request identified by the given request ID. It updates the pre-allocation cache
@@ -203,13 +189,15 @@ class BackendInterface(ABC):
             request_arrival_time: The arrival time of the request.
             block_num: The number of cache blocks that need to be pre-allocated for the request.
             token_ids: The token IDs of the request.
+
         Returns:
-            A list of integers where each integer represents the block table reserved for the migration request.
+            A MigrationResponse type object which stores boolean value indicating if function success and
+            the value returned by function.
         """
         raise NotImplementedError
 
     @abstractmethod
-    def add_running_request(self, backend_request: LlumnixRequest) -> None:
+    async def add_running_request(self, backend_request: LlumnixRequest) -> None:
         """
         Add a backend request to the running queue of backend.
 
@@ -235,8 +223,9 @@ class BackendInterface(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def free_dst_pre_alloc_cache(self, request_id: str = None) -> None:
-        """Free pre-allocated blocks for a migrating request on the destination instance.
+    def free_pre_alloc_cache(self, request_id: RequestIDType) -> None:
+        """
+        Free pre-allocated blocks for a migrating request on the destination instance.
 
         This method is responsible for releasing any cache blocks and other resources that were
         pre-allocated on the destination instance for a migrating request. This is typically called
@@ -249,7 +238,8 @@ class BackendInterface(ABC):
 
     @abstractmethod
     def free_src_request(self, backend_request: LlumnixRequest) -> None:
-        """Free blocks associated with a migrating request on the source instance.
+        """
+        Free blocks associated with a migrating request on the source instance.
 
         Upon completion or cancellation of a migration process, this method is invoked to clean up and
         release any reserved resources such as block tables and other metadata on the source instance.
@@ -260,12 +250,12 @@ class BackendInterface(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    async def send_blocks(self,
-                          dst_ray_actor: "ray.actor.ActorHandle",
-                          src_blocks: List[int],
-                          dst_blocks: List[int],
-                          request_id: str,
-                          is_last_stage: bool) -> None:
+    async def send_cache(self,
+                         dst_instance_actor: ray.actor.ActorHandle,
+                         src_blocks: List[int],
+                         dst_blocks: List[int],
+                         request_id: RequestIDType,
+                         is_last_stage: bool) -> MigrationResponse:
         """
         Send cache blocks from the source instance to the destination instance.
 
@@ -274,38 +264,79 @@ class BackendInterface(ABC):
         the destination instance, where they are mapped according to the destination block table.
 
         Args:
-            dst_ray_actor: A handle to the Ray actor representing the destination instance where the cache blocks are
-                           to be sent. This handle is used to reference the destination's execution context and manage
-                           the block transfer.
+            dst_instance_actor: A handle to the Ray actor representing the destination instance where the cache blocks are
+                                to be sent.
             src_blocks: A list of integers representing the block indexs in the source instance's cache that need to be
                         sent to the destination.
             dst_blocks: A list of integers representing the block indexs in the destination instance's cache where the
                         incoming blocks should be stored.
             request_id: Request ID.
             is_last_stage: A boolean indicating whether this is the last stage of the migration.
+
+        Returns:
+            A MigrationResponse type object which stores boolean value indicating if function success and
+            the value returned by function.
         """
         raise NotImplementedError
 
     @abstractmethod
-    async def commit_dst_request(self, backend_request: LlumnixRequest) -> None:
-        """Commit the migrating request to the destination instance.
+    async def recv_cache(self,
+                         request_id: RequestIDType,
+                         src_worker_handle_list: List[Any],
+                         src_blocks: List[int],
+                         dst_blocks: List[int],
+                         is_last_stage: bool) -> MigrationResponse:
+        """
+        Recv cache blocks from the source instance to the destination instance.
+
+        This method orchestrates the physical transfer of cache blocks between instances by Ray. It is responsible
+        for ensuring that the specified blocks from the source instance's cache are sent to and properly received by
+        the destination instance, where they are mapped according to the destination block table.
+
+        Args:
+            request_id: Request ID.
+            src_worker_handle_list: The handle list of workers in the source instance.
+            src_blocks: A list of integers representing the block indexs in the source instance's cache that need to be
+                        sent to the destination.
+            dst_blocks: A list of integers representing the block indexs in the destination instance's cache where the
+                        incoming blocks should be stored.
+            is_last_stage: A boolean indicating whether this is the last stage of the migration.
+
+        Returns:
+            A MigrationResponse type object which stores boolean value indicating if function success and
+            the value returned by function.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    async def commit_dst_request(self, request_id: RequestIDType, backend_request: LlumnixRequest) -> MigrationResponse:
+        """
+        Commit the migrating request to the destination instance.
 
         This method finalizes the migration process by transferring all necessary metadata and resource information
         (such as the block table) to the destination instance. Upon completion, the destination instance should have
         all the required data to resume and handle the request as if it originated there natively.
 
         Args:
+            request_id: Request ID.
             backend_request: An object representing the backend request.
+
+        Returns:
+            A MigrationResponse type object which stores boolean value indicating if function success and
+            the value returned by function.
         """
         raise NotImplementedError
 
     @abstractmethod
-    def get_all_request_ids(self) -> List[str]:
-        """Get all requests in instance.
+    async def _run_workers_async(self, *args, timeout=RAY_RPC_TIMEOUT, **kwargs) -> List[Any]:
+        """
+        Run all workers with the given method asynchronously.
+        """
+        raise NotImplementedError
 
-        This method is used by the manager to get all requests in instance when it restarts.
-
-        Returns:
-            The list of request ID.
+    @abstractmethod
+    def get_instance_info(self) -> InstanceInfo:
+        """
+        Get instance info from backend engine.
         """
         raise NotImplementedError

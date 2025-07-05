@@ -24,9 +24,13 @@ bladellm_install:
 	@pip install -e .[bladellm]
 	@make proto
 
+.PHONY: vllm_v1_install
+vllm_v1_install:
+	@pip install -e .[vllm_v1]
+
 .PHONY: lint
 lint: check_pylint_installed check_pytest_installed
-	@pylint --rcfile=.pylintrc -s n --jobs=128 ./llumnix
+	@pylint --rcfile=.pylintrc -s n --jobs=128 ./llumnix setup.py --ignore=llumnix/backends/bladellm/proto
 
 	@pylint --rcfile=.pylintrc \
 			--disable=protected-access,super-init-not-called,unused-argument,redefined-outer-name,invalid-name \
@@ -39,7 +43,7 @@ clean: proto-clean
 
 .PHONY: proto
 proto:
-	@find . -type d -name "proto" | while read dir; do \
+	@find . -type d -name "proto" -not -path "./build/*" | while read dir; do \
 	    dir_base=$$(dirname $$dir); \
 	    find $$dir -name "*.proto" | while read proto_file; do \
 	        echo "Compiling $$proto_file"; \
@@ -57,18 +61,18 @@ proto-clean:
 ###################################### test begin #######################################
 
 .PHONY: vllm_test
-vllm_test: check_pytest_installed vllm_unit_test vllm_offline_test vllm_correctness_test vllm_bench_test vllm_migration_test
+vllm_test: check_pytest_installed vllm_unit_test vllm_offline_test vllm_correctness_test vllm_bench_test vllm_migration_test vllm_register_service_test
 
 .PHONY: bladellm_test
-bladellm_test: check_pytest_installed bladellm_unit_test bladellm_correctness_test bladellm_bench_test bladellm_migration_test
-
-.PHONY: vllm_unit_test
-vllm_unit_test: check_pytest_installed
-	@pytest -v --ignore=third_party --ignore=tests/e2e_test --ignore-glob="tests/**/bladellm" --disable-warnings
+bladellm_test: check_pytest_installed bladellm_correctness_test bladellm_bench_test bladellm_migration_test bladellm_register_service_test bladellm_server_test
 
 .PHONY: bladellm_unit_test
 bladellm_unit_test: check_pytest_installed
-	@pytest -v -k 'engine_BladeLLM or not engine_' --ignore=third_party --ignore=tests/e2e_test --ignore-glob="tests/**/vllm" --disable-warnings
+	@pytest -v --ignore=third_party --disable-warnings ./tests/unit_test/**/bladellm/
+
+.PHONY: vllm_unit_test
+vllm_unit_test: check_pytest_installed
+	@pytest -v --ignore=third_party --ignore-glob="tests/**/bladellm" --disable-warnings ./tests/unit_test/
 
 .PHONY: vllm_offline_test
 vllm_offline_test:
@@ -77,28 +81,40 @@ vllm_offline_test:
 # TODO(KuilongCui): add bladellm offine inference example
 
 .PHONY: vllm_correctness_test
-vllm_correctness_test:
+vllm_correctness_test: check_pytest_installed
 	@pytest -v -x -s -k 'engine_vLLM or not engine_' --tb=long ./tests/e2e_test/test_correctness.py
 
 .PHONY: bladellm_correctness_test
-bladellm_correctness_test:
-	@pytest -v -k 'engine_BladeLLM or not engine_' -x -s --tb=long ./tests/e2e_test/test_correctness.py
+bladellm_correctness_test: check_pytest_installed
+	@pytest -v -x -s -k 'engine_BladeLLM or not engine_' --tb=long ./tests/e2e_test/test_correctness.py
 
 .PHONY: vllm_bench_test
-vllm_bench_test:
+vllm_bench_test: check_pytest_installed
 	@pytest -v -x -s -k 'engine_vLLM or not engine_' --tb=long ./tests/e2e_test/test_bench.py
 
 .PHONY: bladellm_bench_test
-bladellm_bench_test:
-	@pytest -v -k 'engine_BladeLLM or not engine_' -x -s --tb=long ./tests/e2e_test/test_bench.py
+bladellm_bench_test: check_pytest_installed
+	@pytest -v -x -s -k 'engine_BladeLLM or not engine_' --tb=long ./tests/e2e_test/test_bench.py
 
 .PHONY: vllm_migration_test
-vllm_migration_test:
+vllm_migration_test: check_pytest_installed
 	@pytest -v -x -s -k 'engine_vLLM or not engine_' --tb=long ./tests/e2e_test/test_migration.py
 
 .PHONY: bladellm_migration_test
-bladellm_migration_test:
-	@pytest -v -k 'engine_BladeLLM or not engine_' -x -s --tb=long ./tests/e2e_test/test_migration.py
+bladellm_migration_test: check_pytest_installed
+	@pytest -v -x -s -k 'engine_BladeLLM or not engine_' --tb=long ./tests/e2e_test/test_migration.py
+
+.PHONY: vllm_register_service_test
+vllm_register_service_test: check_pytest_installed
+	@pytest -v -x -s -k 'engine_vLLM or not engine_' --tb=long ./tests/e2e_test/test_register_service.py
+
+.PHONY: bladellm_register_service_test
+bladellm_register_service_test: check_pytest_installed
+	@pytest -v -x -s -k 'engine_BladeLLM or not engine_' --tb=long ./tests/e2e_test/test_register_service.py
+
+.PHONY: bladellm_server_test
+bladellm_server_test: check_pytest_installed
+	@pytest -v -x -s -k 'engine_BladeLLM or not engine_' --tb=long ./tests/e2e_test/test_server.py
 
 ####################################### test end ########################################
 
@@ -127,9 +143,9 @@ PYLINT_VERSION = 2.12.2
 
 .PHONY: check_pylint_installed
 check_pylint_installed:
-	@python3 -m pip show pylint > /dev/null 2>&1 || { \
-		echo "pylint is not installed. Installing pylint $(PYLINT_VERSION)..."; \
-		python3 -m pip install pylint==$(PYLINT_VERSION); }
+	@python3 -c "import pylint; assert pylint.__version__ == '$(PYLINT_VERSION)'" 2>/dev/null || { \
+		echo "pylint is not installed or version does not match $(PYLINT_VERSION). Installing..."; \
+		python3 -m pip install --force-reinstall pylint==$(PYLINT_VERSION); }
 
 ###################################### pylint end #######################################
 
@@ -144,5 +160,9 @@ check_pytest_installed:
 	@python3 -m pip show pytest-asyncio > /dev/null 2>&1 || { \
 		echo "pytest-asyncio is not installed. Installing pytest-asyncio ..."; \
 		python3 -m pip install pytest-asyncio; }
+
+	@python3 -m pip show pytest-timeout > /dev/null 2>&1 || { \
+		echo "pytest-timeout is not installed. Installing pytest-timeout ..."; \
+		python3 -m pip install -i https://mirrors.aliyun.com/pypi/simple/ pytest-timeout; }
 
 ###################################### pytest end #######################################

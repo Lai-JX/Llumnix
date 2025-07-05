@@ -33,7 +33,7 @@ from llumnix.queue.zmq_utils import (
     get_open_zmq_ipc_path,
     get_zmq_socket_name,
 )
-from llumnix.constants import RPC_GET_DATA_TIMEOUT_MS, ZMQ_IO_THREADS
+from llumnix.constants import ZMQ_RPC_TIMEOUT, ZMQ_IO_THREADS
 from llumnix.metrics.timestamps import set_timestamp
 
 logger = init_logger(__name__)
@@ -85,10 +85,10 @@ class ZmqSocketFactory:
 
 class ZmqClient(QueueClientBase):
     def __init__(self):
+        super().__init__()
         self.context = zmq.asyncio.Context(ZMQ_IO_THREADS)
         self.socket_factory: ZmqSocketFactory = ZmqSocketFactory(context=self.context)
 
-    # This function is not called explicitly.
     def close(self):
         self.socket_factory.close_all_sockets()
         self.context.destroy()
@@ -97,12 +97,16 @@ class ZmqClient(QueueClientBase):
         self, request: RPC_REQUEST_TYPE, ip: str, port: int, error_message: str
     ):
         async def do_rpc_call(socket: zmq.asyncio.Socket, request: RPC_REQUEST_TYPE):
+            if isinstance(
+                request, (RPCPutNoWaitQueueRequest, RPCPutNoWaitBatchQueueRequest)
+            ) and self.need_record_latency():
+                request.send_time = time.perf_counter()
 
             await socket.send_multipart([cloudpickle.dumps(request)])
 
-            if await socket.poll(timeout=RPC_GET_DATA_TIMEOUT_MS) == 0:
+            if await socket.poll(timeout=(ZMQ_RPC_TIMEOUT * 1000)) == 0:
                 raise TimeoutError(
-                    f"Server didn't reply within {RPC_GET_DATA_TIMEOUT_MS} ms"
+                    f"Server didn't reply within {ZMQ_RPC_TIMEOUT * 1000} ms"
                 )
 
             return cloudpickle.loads(await socket.recv())
@@ -111,8 +115,9 @@ class ZmqClient(QueueClientBase):
             socket_connection = self.socket_factory.get_socket(ip, port)
             async with socket_connection as socket:
                 response = await do_rpc_call(socket, request)
-        except (TimeoutError, zmq.ZMQError) as e:
-            logger.error("send one way rpc request failed.  %s", {e})
+        # pylint: disable=broad-except
+        except Exception as e:
+            logger.error("Failed to send one way rpc request, exception: {}.".format(e))
             response = e
         if not isinstance(response, str) or response != RPC_SUCCESS_STR:
             # close the socket if something wrong

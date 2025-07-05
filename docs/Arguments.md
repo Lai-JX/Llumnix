@@ -15,14 +15,17 @@ usage: -m llumnix.entrypoints.vllm.api_server [-h]
             [--ray-cluster-port RAY_CLUSTER_PORT]
             [--disable-log-to-driver]
             [--request-output-queue-type {rayqueue,zmq}]
-            [--request-output-queue-port REQUEST_OUTPUT_QUEUE_PORT]
             [--disable-log-requests-server]
             [--log-request-timestamps]
             [--config-file CONFIG_FILE]
             [--initial-instances INITIAL_INSTANCES]
-            [--dispatch-load-metric {remaining_steps,usage_ratio}]
-            [--migration-load-metric {remaining_steps,usage_ratio}]
-            [--scaling-load-metric {remaining_steps,usage_ratio}]
+            [--dispatch-load-metric {remaining_steps,kv_blocks_ratio}]
+            [--dispatch-prefill-load-metric {remaining_steps,kv_blocks_ratio}]
+            [--dispatch-prefill-as-decode-load-metric {remaining_steps,kv_blocks_ratio,adaptive_decode}]
+            [--dispatch-decode-load-metric {remaining_steps,kv_blocks_ratio}]
+            [--dispatch-decode-as-prefill-load-metric {remaining_steps,kv_blocks_ratio}]
+            [--migration-load-metric {remaining_steps,kv_blocks_ratio}]
+            [--scaling-load-metric {remaining_steps,kv_blocks_ratio}]
             [--polling-interval POLLING_INTERVAL]
             [--dispatch-policy {balanced,load,queue,rr}]
             [--topk-random-dispatch TOPK_RANDOM_DISPATCH]
@@ -31,6 +34,7 @@ usage: -m llumnix.entrypoints.vllm.api_server [-h]
             [--pair-migration-frequency PAIR_MIGRATION_FREQUENCY]
             [--pair-migration-policy {balanced,defrag}]
             [--migrate-out-threshold MIGRATE_OUT_THRESHOLD]
+            [--max-migration-concurrency MAX_MIGRATION_CONCURRENCY]
             [--request-migration-policy {LCR,SR,LR,FCW,FCWSR}]
             [--enable-scaling]
             [--min-instances MIN_INSTANCES]
@@ -39,7 +43,6 @@ usage: -m llumnix.entrypoints.vllm.api_server [-h]
             [--scaling-policy {max_load,avg_load}]
             [--scale-up-threshold SCALE_UP_THRESHOLD]
             [--scale-down-threshold SCALE_DOWN_THRESHOLD]
-            [--disable-log-requests-manager]
             [--log-instance-info]
             [--log-filename LOG_FILENAME]
             [--simulator-mode]
@@ -50,11 +53,12 @@ usage: -m llumnix.entrypoints.vllm.api_server [-h]
             [--migration-num-layers MIGRATION_NUM_LAYERS]
             [--migration-backend-init-timeout MIGRATION_BACKEND_INIT_TIMEOUT]
             [--kvtransfer-migration-backend-transfer-type {ipc,rdma}]
-            [--grpc-migration-backend-server-port GRPC_MIGRATION_BACKEND_SERVER_PORT]
             [--kvtransfer-migration-backend-naming-url KVTRANSFER_MIGRATION_BACKEND_NAMING_URL]
             [--migration-max-stages MIGRATION_MAX_STAGES]
             [--migration-last-stage-max-blocks MIGRATION_LAST_STAGE_MAX_BLOCKS]
+            [--enable-adaptive-pd]
             [--enable-pd-disagg]
+            [--enable-engine-pd-disagg]
             [--pd-ratio PD_RATIO]
             [--load-registered-service]
             [--load-registered-service-path]
@@ -62,6 +66,7 @@ usage: -m llumnix.entrypoints.vllm.api_server [-h]
             [--enable-port-offset-store]
             [--instance-type INSTANCE_TYPE]
             [--engine-disagg-inst-id-env-var]
+            [--request-output-token-forwarding-mode]
 
 ```
 
@@ -99,11 +104,7 @@ usage: -m llumnix.entrypoints.vllm.api_server [-h]
 `--request-output-queue-type`
 - Queue type for request output queue.
 - Possible choices: rayqueue, zmq
-- Default: "rayqueue"
-
-`--request-output-queue-port`
-- Port number for the zmq request output queue.
-- Default: 1234
+- Default: "zmq"
 
 `--disable-log-requests-server`
 - Disable logging requests in server.
@@ -121,17 +122,37 @@ usage: -m llumnix.entrypoints.vllm.api_server [-h]
 
 `--dispatch-load-metric`
 - Instance dispatch load metric.
-- Possible choices: remaining_steps, usage_ratio
+- Possible choices: remaining_steps, kv_blocks_ratio
 - Default: "remaining_steps"
+
+`--dispatch-prefill-load-metric`
+- Instance dispatch load metric for prefill instance under prefill-decode disaggregation.
+- Possible choices: remaining_steps, kv_blocks_ratio
+- Default: "kv_blocks_ratio"
+
+`--dispatch-prefill-as-decode-load-metric`
+- [Experimental] Instance dispatch load metric for prefill instance when decoding under adaptive prefill-decode disaggregation.
+- Possible choices: remaining_steps, kv_blocks_ratio, adaptive_decode
+- Default: "adaptive_decode"
+
+`--dispatch-decode-load-metric`
+- Instance dispatch load metric for decode instance under prefill-decode disaggregation.
+- Possible choices: remaining_steps, kv_blocks_ratio
+- Default: "remaining_steps"
+
+`--dispatch-decode-as-prefill-load-metric`
+- [Experimental] Instance dispatch load metric for decode instance when prefilling under adaptive prefill-decode disaggregation.
+- Possible choices: remaining_steps, kv_blocks_ratio
+- Default: "kv_blocks_ratio"
 
 `--migration-load-metric`
 - Instance migration load metric.
-- Possible choices: remaining_steps, usage_ratio
+- Possible choices: remaining_steps, kv_blocks_ratio
 - Default: "remaining_steps"
 
 `--scaling-load-metric`
 - Instance scaling load metric.
-- Possible choices: remaining_steps, usage_ratio
+- Possible choices: remaining_steps, kv_blocks_ratio
 - Default: "remaining_steps"
 
 `--polling-interval`
@@ -166,6 +187,10 @@ usage: -m llumnix.entrypoints.vllm.api_server [-h]
 - Migrate out instance load threshold.
 - Default: 3.0
 
+`--max-migration-concurrency`
+- Max migration concurrency.
+- Default: 1
+
 `--request-migration-policy`
 - Request migration policy.
 - Possible choices: LCR, SR, LR, FCW, FCWSR
@@ -198,9 +223,6 @@ usage: -m llumnix.entrypoints.vllm.api_server [-h]
 `--scale-down-threshold`
 - Scale down threshold.
 - Default: 60
-
-`--disable-log-requests-manager`
-- Disable logging requests in manager.
 
 `--log-instance-info`
 - Enable logging instance info.
@@ -238,10 +260,6 @@ usage: -m llumnix.entrypoints.vllm.api_server [-h]
 - Possible choices: ipc, rdma
 - Default: "rdma"
 
-`--grpc-migration-backend-server-port`
-- Port of grpc server for migration backend
-- Default: 50051
-
 `--kvtransfer-migration-backend-naming-url`
 - URL of naming server for kvtransfer migration backend
 - Default: "file:/tmp/llumnix/naming/"
@@ -255,7 +273,13 @@ usage: -m llumnix.entrypoints.vllm.api_server [-h]
 - Default: 16
 
 `--enable-pd-disagg`
-- Enable prefill decode disaggregation.
+- Enable prefill decode disaggregation (for vLLM).
+
+`--enable-engine-pd-disagg`
+- Enable engine-based prefill decode disaggregation (for BladeLLM).
+
+`--enable-adaptive-pd`
+- [Experimental] Enable adaptive prefill decode disaggregation.
 
 `--pd-ratio`
 - The p:d ratio used in gloabl launch mode.
@@ -280,7 +304,11 @@ usage: -m llumnix.entrypoints.vllm.api_server [-h]
 - Possible choices: prefill, decode, no_constraints
 
 `--engine-disagg-inst-id-env-var`
-- specify which environment variable to use as the engine instance id.
+- Specify which environment variable to use as the engine instance id.
+
+`--request-output-forwarding-mode`
+- Mode of forwarding request output.
+- Possible choices: thread, actor
 
 # Unsupported vLLM feature options
 

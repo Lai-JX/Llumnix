@@ -31,11 +31,9 @@ _C.SERVER.SSL_KEYFILE = None
 # Path to SSL certificate file
 _C.SERVER.SSL_CERTFILE = None
 # Log level for the server
-_C.SERVER.LOG_LEVEL = "info"
+_C.SERVER.SERVER_LOG_LEVEL = "info"
 # Queue type for request output queue
-_C.SERVER.REQUEST_OUTPUT_QUEUE_TYPE = "rayqueue"
-# Port number for the zmq request output queue
-_C.SERVER.REQUEST_OUTPUT_QUEUE_PORT = 1234
+_C.SERVER.REQUEST_OUTPUT_QUEUE_TYPE = "zmq"
 # Disable logging requests in server
 _C.SERVER.DISABLE_LOG_REQUESTS_SERVER = False
 # Enable logging request timestamp
@@ -73,6 +71,10 @@ _C.MANAGER.ENABLE_PORT_INCREMENT = False
 _C.MANAGER.ENABLE_PORT_OFFSET_STORE = False
 # Enable prefill-decode disaggregation
 _C.MANAGER.ENABLE_PD_DISAGG = False
+# Enable adaptive prefill-decode disaggregation
+_C.MANAGER.ENABLE_ADAPTIVE_PD = False
+# Enable engine-based prefill-decode disaggregation
+_C.MANAGER.ENABLE_ENGINE_PD_DISAGG = False
 # The p:d ratio used in gloabl launch mode
 _C.MANAGER.PD_RATIO = "1:1"
 # Load engine arguments from storage
@@ -126,18 +128,30 @@ _C.INSTANCE.INSTANCE_TYPE = "no_constraints"
 _C.INSTANCE.SIMULATOR_MODE = False
 # Profiling result file path when using simulator
 _C.INSTANCE.PROFILING_RESULT_FILE_PATH = None
-# environment variable used as bladellm engine instance id
+# Environment variable used as bladellm engine instance id
 _C.INSTANCE.ENGINE_DISAGG_INST_ID_ENV_VAR = None
+# Mode of forwarding request output
+_C.INSTANCE.REQUEST_OUTPUT_FORWARDING_MODE = "thread"
 
 # ------------------------- LOAD METRICS CONFIGURATION ------------------------
 # Instance dispatch load metric
 _C.INSTANCE.DISPATCH_LOAD_METRIC = 'remaining_steps'
+# Prefill instance dispatch load metric
+_C.INSTANCE.DISPATCH_PREFILL_LOAD_METRIC = 'kv_blocks_ratio'
+# Prefill instance dispatch load metric when used for decoding
+_C.INSTANCE.DISPATCH_PREFILL_AS_DECODE_LOAD_METRIC = 'adaptive_decode'
+# Decode instance dispatch load metric
+_C.INSTANCE.DISPATCH_DECODE_LOAD_METRIC = 'remaining_steps'
+# Decode instance dispatch load metric when used for prefilling
+_C.INSTANCE.DISPATCH_DECODE_AS_PREFILL_LOAD_METRIC = 'kv_blocks_ratio'
 # Instance migration load metric
 _C.INSTANCE.MIGRATION_LOAD_METRIC = 'remaining_steps'
 
 # -------------------------- MIGRATION CONFIGURATION --------------------------
 # Enable defragmentation through migration based on virtual usage
 _C.INSTANCE.ENABLE_DEFRAG = False
+# Max migration concurrency
+_C.INSTANCE.MAX_MIGRATION_CONCURRENCY = 1
 # Request migration policy
 _C.INSTANCE.REQUEST_MIGRATION_POLICY = 'SR'
 # Drop migration if the number of stages > migration_max_stages
@@ -154,7 +168,5 @@ _C.INSTANCE.MIGRATION_NUM_LAYERS = 1
 _C.INSTANCE.MIGRATION_BACKEND_INIT_TIMEOUT = 10.0
 # Transfer type for migration backend kvTransfer
 _C.INSTANCE.KVTRANSFER_MIGRATION_BACKEND_TRANSFER_TYPE = "rdma"
-# Address of grpc server for migration backend
-_C.INSTANCE.GRPC_MIGRATION_BACKEND_SERVER_PORT = 50051
 # URL of naming server for kvtransfer migration backend
 _C.INSTANCE.KVTRANSFER_MIGRATION_BACKEND_NAMING_URL = "file:/tmp/llumnix/naming/"

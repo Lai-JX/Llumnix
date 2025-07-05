@@ -15,16 +15,30 @@ import os
 import pytest
 import ray
 
-from llumnix.arg_utils import ManagerArgs
-from llumnix.entrypoints.setup import launch_ray_cluster, init_manager
-from llumnix.entrypoints.utils import retry_manager_method_sync, retry_manager_method_async
-from llumnix.utils import get_ip_address
+from vllm.engine.arg_utils import EngineArgs
+
+from llumnix.arg_utils import ManagerArgs, InstanceArgs, EntrypointsArgs, LaunchArgs, LaunchMode
+from llumnix.entrypoints.setup import launch_ray_cluster
+from llumnix.utils import get_ip_address, BackendType
 from llumnix.queue.utils import init_request_output_queue_server
 from llumnix.ray_utils import get_manager_name
+from llumnix.manager import Manager
+from llumnix.scaler import Scaler
 
 # pylint: disable=unused-import
 from tests.conftest import ray_env
 
+
+@pytest.fixture
+def manager():
+    engine_args = EngineArgs(model="facebook/opt-125m", download_dir="/mnt/model", worker_use_ray=True, enforce_eager=True)
+    scaler: Scaler = Scaler.from_args(
+        EntrypointsArgs(), ManagerArgs(), InstanceArgs(), engine_args,
+        LaunchArgs(backend_type=BackendType.VLLM, launch_mode=LaunchMode.LOCAL))
+    ray.get(scaler.is_ready.remote())
+    manager: Manager = ray.get_actor(get_manager_name(), namespace='llumnix')
+    ray.get(manager.is_ready.remote())
+    yield manager
 
 def test_launch_ray_cluster():
     ip_address = get_ip_address()
@@ -33,8 +47,7 @@ def test_launch_ray_cluster():
     result = launch_ray_cluster(6379)
     assert result.returncode == 0
 
-def test_init_manager(ray_env):
-    manager = init_manager(ManagerArgs())
+def test_init_manager(ray_env, manager):
     assert manager is not None
     manager_actor_handle = ray.get_actor(get_manager_name(), namespace='llumnix')
     assert manager_actor_handle is not None
@@ -42,17 +55,5 @@ def test_init_manager(ray_env):
 
 def test_init_zmq(ray_env):
     ip = '127.0.0.1'
-    port = 1234
-    request_output_queue = init_request_output_queue_server(ip, port, 'zmq')
+    request_output_queue = init_request_output_queue_server(ip, 'zmq')
     assert request_output_queue is not None
-
-def test_retry_manager_method_sync(ray_env):
-    manager = init_manager(ManagerArgs())
-    ret = retry_manager_method_sync(manager.is_ready.remote, 'is_ready')
-    assert ret is True
-
-@pytest.mark.asyncio
-async def test_retry_manager_method_async(ray_env):
-    manager = init_manager(ManagerArgs())
-    ret = await retry_manager_method_async(manager.is_ready.remote, 'is_ready')
-    assert ret is True

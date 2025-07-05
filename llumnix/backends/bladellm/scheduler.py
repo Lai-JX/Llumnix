@@ -31,6 +31,7 @@ from llumnix.backends.bladellm.sequence import GenerationGroupStateLlumnix
 from llumnix.llumlet.request import RequestStatus
 from llumnix.backends.bladellm.llm_engine import AsyncBackQueueWrapper
 from llumnix.server_info import ServerInfo
+from llumnix.utils import MigrationResponse
 
 
 class PagedSchedulerLlumnix(PagedScheduler):
@@ -39,13 +40,14 @@ class PagedSchedulerLlumnix(PagedScheduler):
         self.llumnix_metrics = BladeLLMMetrics()
         self.id2group: Dict[int, GenerationGroupStateLlumnix] = {}
         self.pre_alloc_cache_dict: Dict[int, BlockTable] = {}
-        self.migrating_out_request_last_stage: Dict[int, int] = {}
+        self.migrating_out_request_last_stage: Dict[int, GenerationGroupStateLlumnix] = {}
         self.llumnix_metrics.block_manager_init_metrics(self.block_manager)
         self.llumnix_metrics.scheduler_init_metrics(self)
 
         self.running_filter_request_ids: Set[int] = set()
         # init in engine.start
         self.trans_wrapper: AsyncBackQueueWrapper = None
+        self.step_counter: int = 0
 
     def pipeline_running_filter(self, batches: Union[List[int], List[GenerationGroupState]]):
         batches = super().pipeline_running_filter(batches)
@@ -74,8 +76,14 @@ class PagedSchedulerLlumnix(PagedScheduler):
         return general_hunger
 
     def step(self) -> SchedulerStepOutput:
-        step_out = super().step()
+        self.step_counter += 1
+        step_out: SchedulerStepOutput = super().step()
         self.llumnix_metrics.scheduler_step_metrics(self)
+
+        # migration may trigger empty scheduler, don't reset engine
+        if step_out.reset and step_out.hunger_timeout_ms and step_out.hunger_timeout_ms > 0:
+            step_out.reset = False
+
         return step_out
 
     # migration related method
@@ -86,15 +94,16 @@ class PagedSchedulerLlumnix(PagedScheduler):
         if gen_group.request_group_id in self.trans_wrapper.request_server_map:
             server_info = self.trans_wrapper.request_server_map[gen_group.request_group_id]
         gen_group_llumnix = GenerationGroupStateLlumnix(
-            gen_group, gen_group.request_group_id,
-            server_info)
+            gen_group, gen_group.request_group_id, server_info
+        )
         gen_group_llumnix._status = RequestStatus.WAITING
         self.id2group[gen_group.request_group_id] = gen_group_llumnix
         super().add_gen_group(gen_group_llumnix, *args, **kwargs)
 
     def drop_request(self, req_id: int):
-        self.id2group[req_id]._status = RequestStatus.FINISHED
-        self.trans_wrapper.drop_request(req_id)
+        if req_id in self.id2group:
+            self.id2group[req_id]._status = RequestStatus.FINISHED
+        self.trans_wrapper.remove_request_server_info(req_id, self.step_counter + 1)
         super().drop_request(req_id)
 
     # happends when moving request from waiting to running
@@ -133,10 +142,12 @@ class PagedSchedulerLlumnix(PagedScheduler):
 
     def remove_running_request(self, request_id: int) -> None:
         for index, gen_group in enumerate(self.running):
+            assert isinstance(gen_group, GenerationGroupStateLlumnix)
             if gen_group.request_group_id == request_id:
                 self.running.pop(index)
                 self._detokenizer.remove_state(request_id)
                 self.id2group.pop(request_id, None)
+                gen_group.set_status(RequestStatus.RUNNING_MIGRATING)
                 return True
         return False
 
@@ -149,9 +160,10 @@ class PagedSchedulerLlumnix(PagedScheduler):
         return False
 
     def add_migrating_out_request_last_stage(self, backend_request: GenerationGroupStateLlumnix) -> None:
-        self.migrating_out_request_last_stage[backend_request.request_group_id] = backend_request.request_group_id
+        self.migrating_out_request_last_stage[backend_request.request_group_id] = backend_request
 
     def add_running_request(self, backend_request: GenerationGroupStateLlumnix) -> None:
+        backend_request.set_status(RequestStatus.RUNNING)
         self.id2group[backend_request.request_id] = backend_request
         self._detokenizer.add_new_request(
             backend_request.paged_reqs[0].req_proto,
@@ -169,15 +181,20 @@ class PagedSchedulerLlumnix(PagedScheduler):
         self.migrating_out_request_last_stage.pop(backend_request.request_id)
 
     # pylint: disable=unused-argument
-    def pre_alloc(self, request_id: int, request_status: RequestStatus, request_arrival_time: float,
-                  block_num: int, token_ids: List[int]) -> List[int]:
+    def pre_alloc_cache(self,
+                        request_id: int,
+                        request_status: RequestStatus,
+                        request_arrival_time: float,
+                        block_num: int,
+                        token_ids: List[int]) -> MigrationResponse:
         if request_status == RequestStatus.WAITING_MIGRATING:
             if (self.waiting and request_arrival_time > self.waiting[0].arrival_time):
-                return []
+                return MigrationResponse(success=False, return_value=None)
+
+        if not self.block_manager.can_allocate_num_blocks(block_num):
+            return MigrationResponse(success=False, return_value=None)
 
         blocks = []
-        if not self.block_manager.can_allocate_num_blocks(block_num):
-            return blocks
         for _ in range(block_num):
             block = self.block_manager.gpu_allocator.allocate()
             block.ref_count = 1
@@ -186,41 +203,21 @@ class PagedSchedulerLlumnix(PagedScheduler):
         pre_blocks.extend(blocks)
         self.pre_alloc_cache_dict[request_id] = pre_blocks
         blocks = [block.block_number for block in blocks]
-        return blocks
+
+        return MigrationResponse(success=True, return_value=blocks)
 
     def free_src_request(self, backend_request: GenerationGroupStateLlumnix) -> None:
         assert backend_request.paged_reqs[0].block_table_id in self.block_manager.block_tables, "block table not found"
         self._free_req(backend_request)
         self._finished_req_to_remove.append(FinishedInfo(request_id=backend_request.request_id, pos=0))
 
-    def free_dst_pre_alloc_cache(self, request_id: int = None) -> None:
-        if request_id:
-            blocks = self.pre_alloc_cache_dict.pop(request_id, [])
-            # pylint: disable=protected-access
-            self.block_manager._free_block_table(blocks)
-        else:
-            # Clear all pre-allocated cache of dst instance when src instance encounters exception.
-            request_ids = list(self.pre_alloc_cache_dict.keys())
-            for req_id in request_ids:
-                blocks = self.pre_alloc_cache_dict.pop(req_id, [])
-                # pylint: disable=protected-access
-                self.block_manager._free_block_table(blocks)
-
-    def free_migrating_out_requests_last_stage(self) -> List[GenerationGroupStateLlumnix]:
-        migrating_out_requests_last_stage = list(self.migrating_out_request_last_stage.values())
-        self.migrating_out_request_last_stage.clear()
-        return migrating_out_requests_last_stage
+    def free_pre_alloc_cache(self, request_id: int) -> None:
+        blocks = self.pre_alloc_cache_dict.pop(request_id, [])
+        # pylint: disable=protected-access
+        self.block_manager._free_block_table(blocks)
 
     def add_block_table(self, block_table: BlockTable, block_table_id: int) -> None:
         self.block_manager.block_tables[block_table_id] = block_table
-
-    # metrics
-    def get_all_request_ids(self) -> List[int]:
-        request_ids : List[str] = []
-        for state_queue in [self.waiting, self.running, self.swapped, self.hanging]:
-            for seq_group in state_queue:
-                request_ids.append(seq_group.request_group_id)
-        return request_ids
 
     def get_num_killed_requests(self) -> int:
         cnt = len(self.swapped)

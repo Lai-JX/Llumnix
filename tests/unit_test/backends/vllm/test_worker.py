@@ -24,12 +24,13 @@ from vllm.config import EngineConfig
 from vllm.executor.ray_gpu_executor import RayWorkerWrapper
 
 from llumnix.arg_utils import InstanceArgs
-from llumnix.utils import random_uuid, try_convert_to_local_path
+from llumnix.utils import random_uuid
 from llumnix.ray_utils import initialize_placement_group, get_placement_group_name
 from llumnix.backends.vllm.worker import MigrationWorker
 
 # pylint: disable=unused-import
 from tests.conftest import ray_env
+from tests.utils import try_convert_to_local_path
 
 
 class MockMigrationWorker(MigrationWorker):
@@ -51,7 +52,7 @@ class MockMigrationWorker(MigrationWorker):
 def create_worker(rank: int, local_rank: int, engine_config: EngineConfig,
                   worker_module_name="llumnix.backends.vllm.worker",
                   worker_class_name="MigrationWorker",
-                  max_concurrency=1):
+                  max_concurrency=2):
     worker = ray.remote(
         num_cpus=0,
         num_gpus=1,

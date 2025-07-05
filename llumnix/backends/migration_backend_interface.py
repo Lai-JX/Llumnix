@@ -14,9 +14,14 @@
 from abc import ABC, abstractmethod
 from typing import List
 
+import ray.actor
+
+from llumnix.utils import RequestIDType
+
+
 class MigrationBackendBase(ABC):
     @abstractmethod
-    def init_backend(self, group_name, world_size, rank) -> bool:
+    def init_backend(self, group_name: str, world_size: int, rank: int) -> bool:
         raise NotImplementedError
 
     @abstractmethod
@@ -28,12 +33,12 @@ class MigrationBackendBase(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def migrate_cache(self,
-                      src_handle: "ray.actor.ActorHandle",
-                      src_blocks: List[int],
-                      dst_blocks: List[int],
-                      request_id: str,
-                      is_last_stage: bool,
+    def recv_cache(self,
+                   request_id: RequestIDType,
+                   src_worker_handle: ray.actor.ActorHandle,
+                   src_blocks: List[int],
+                   dst_blocks: List[int],
+                   is_last_stage: bool,
                       chunk_size: int=1,
                       chunk_rank: int=0) -> None:
         raise NotImplementedError
@@ -50,9 +55,9 @@ class MigrationBackendBase(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def do_send(self, dst_handle: "ray.actor.ActorHandle", blocks: List[int], virtuel_engine: int,  chunk_size: int=1, chunk_rank: int=0):
+    def do_send(self, dst_worker_handle: ray.actor.ActorHandle, blocks: List[int], virtuel_engine: int,  chunk_size: int=1, chunk_rank: int=0):
         raise NotImplementedError
 
     @abstractmethod
-    def do_recv(self, src_handle: "ray.actor.ActorHandle", blocks: List[int], virtuel_engine: int):
+    def do_recv(self, src_worker_handle: ray.actor.ActorHandle, blocks: List[int], virtuel_engine: int):
         raise NotImplementedError
