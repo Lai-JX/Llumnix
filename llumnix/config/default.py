@@ -151,7 +151,7 @@ _C.INSTANCE.MIGRATION_LOAD_METRIC = 'remaining_steps'
 # Enable defragmentation through migration based on virtual usage
 _C.INSTANCE.ENABLE_DEFRAG = False
 # Max migration concurrency
-_C.INSTANCE.MAX_MIGRATION_CONCURRENCY = 1
+_C.INSTANCE.MAX_MIGRATION_CONCURRENCY = 4
 # Request migration policy
 _C.INSTANCE.REQUEST_MIGRATION_POLICY = 'SR'
 # Drop migration if the number of stages > migration_max_stages

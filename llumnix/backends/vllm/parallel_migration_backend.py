@@ -76,7 +76,7 @@ class MigrationBackendResourcPool:
     def _initialize_pool(self):
         """初始化资源池，预先创建所有 MappedPortResource 并放入队列"""
         with self.lock:
-            for idx in range(self):
+            for idx in range(self.pool_size):
                 backend = MigrationBackendResource(idx=idx)
                 self.idx_backend [idx] = backend
                 self.backend_pool.put(backend.idx)  # 将迁移后端的idx放入队列

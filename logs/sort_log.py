@@ -28,8 +28,8 @@ def log_sort_key(line):
         return ts
 
 def main():
-    input_file = "/workspace/llm-serve/Llumnix/logs/l40-pdd--test/llama-2-13b/uniform/gloo/serve_pdd_tp2_30_qps_4_1_1_prompt_len_256_response_len_128.log"
-    output_file = "/workspace/llm-serve/Llumnix/logs/l40-pdd--test/llama-2-13b/uniform/gloo/serve_pdd_tp2_30_qps_4_1_1_prompt_len_256_response_len_128_sorted.log"
+    input_file = "/workspace/llm-serve/Llumnix/benchmark_test/logs/A6000-2-multi-port-zmp-parallel-main-pdd-4/llama-7b/poisson/serve_pdd_tp1_2000_qps_6_2_2.log"
+    output_file = input_file.replace(".log", "_sorted.log")
 
     with open(input_file, "r", encoding="utf-8") as f:
         lines = f.readlines()

@@ -18,6 +18,7 @@ import asyncio
 import functools
 import inspect
 
+from llumnix.metrics.timestamps import set_timestamp
 import ray.actor
 
 from llumnix.logging.logger import init_logger
@@ -170,12 +171,13 @@ def update_migrating_out_request_id_set_decorator(func: Callable):
     async def async_wrapper(self, *args, **kwargs):
         request_id = inspect_request_id(func, self, *args, **kwargs)
         if request_id not in self.migrating_out_request_id_set:
-            self.migrating_out_request_id_set.add(request_id)
+            # self.migrating_out_request_id_set.add(request_id)
+            pass
         try:
             return await func(self, *args, **kwargs)
         finally:
             assert request_id in self.migrating_out_request_id_set, \
-                "request_id is added to migrating_out_request_id_set for each migration"
+                f"{request_id} request_id is added to migrating_out_request_id_set for each migration"
             self.migrating_out_request_id_set.remove(request_id)
 
     return async_wrapper
@@ -199,17 +201,24 @@ def update_migrating_in_request_id_set_decorator(func):
 
     def add_migrating_in_request_id_set(self, request_id: RequestIDType):
         if request_id not in self.migrating_in_request_id_set:
+            logger.info(f"Add migrating_in_request_id_set: {request_id}")
             self.migrating_in_request_id_set.add(request_id)
 
     def remove_migrating_in_request_id_set(self, request_id: RequestIDType):
         if request_id not in self.pending_migrate_in_request_time:
-            assert request_id in self.migrating_in_request_id_set, \
-                "request_id is added to migrating_in_request_id_set for each migration"
-            self.migrating_in_request_id_set.remove(request_id)
+            # assert request_id in self.migrating_in_request_id_set, \
+            #     f"{request_id} request_id is added to migrating_in_request_id_set for each migration"
+            if request_id not in self.migrating_in_request_id_set:
+                logger.warning(f"request_id {request_id} not in migrating_in_request_id_set, "
+                               f"but trying to remove it. This may happen when the request is already removed from func free_pre_alloc_cache.(ABORTED_DST)")
+            else:
+                logger.info(f"Remove migrating_in_request_id_set: {request_id}")
+                self.migrating_in_request_id_set.remove(request_id)
 
     @functools.wraps(func)
     async def async_wrapper(self, *args, **kwargs):
         request_id = inspect_request_id(func, self, *args, **kwargs)
+        logger.info(f"update migrating_in_request_id_set, request_id: {request_id}, func.__name__(async): {func.__name__}")
         add_migrating_in_request_id_set(self, request_id)
         try:
             return await func(self, *args, **kwargs)
@@ -219,12 +228,13 @@ def update_migrating_in_request_id_set_decorator(func):
     @functools.wraps(func)
     def sync_wrapper(self, *args, **kwargs):
         request_id = inspect_request_id(func, self, *args, **kwargs)
+        logger.info(f"update migrating_in_request_id_set, request_id: {request_id}, func.__name__(sync): {func.__name__}")
         add_migrating_in_request_id_set(self, request_id)
         try:
             return func(self, *args, **kwargs)
         finally:
             remove_migrating_in_request_id_set(self, request_id)
-
+    
     if asyncio.iscoroutinefunction(func):
         return async_wrapper
     return sync_wrapper
@@ -248,36 +258,68 @@ class MigrationCoordinator:
         self.migration_max_stages = migration_max_stages
         self.pending_migrate_in_request_time: Dict[str, float] = {}
         self.migrating_out_request_id_set = set()
+        # self.migrating_out_request_id_set_lock = asyncio.Lock()
         self.migrating_in_request_id_set = set()
         asyncio.create_task(self._watch_pending_migrate_in_requests_loop())
 
     async def migrate_out(self, dst_instance_actor: ray.actor.ActorHandle, dst_instance_id: str) -> List[RequestIDType]:
-        if not self.has_migration_slot():
-            logger.debug(
-                "Max migration concurrency ({}) reached, reject new migrate out request attempt.".format(
-                    self.max_migration_concurrency
-                )
-            )
-            return []
+        # if not self.has_migration_slot():
+        #     logger.debug(
+        #         "Max migration concurrency ({}) reached, reject new migrate out request attempt.".format(
+        #             self.max_migration_concurrency
+        #         )
+        #     )
+        #     return []
 
         migrate_out_requests = self.migration_scheduler.get_migrate_out_requests()
+        request_ids = [request.request_id for request in migrate_out_requests]
+        if len(request_ids) > 0:
+            logger.info(f'migrate_out: {request_ids}, instance_id: {self.instance_id}, dst_instance_id: {dst_instance_id}')
 
         if len(migrate_out_requests) == 0:
             return []
 
-        for migrate_out_request in migrate_out_requests:
-            migrate_out_request.is_migrating = True
+        # for migrate_out_request in migrate_out_requests:
+        #     migrate_out_request.is_migrating = True
 
         migrated_request_list = []
+        real_migrate_out_requests = []
+        tasks = []
         for migrate_out_request in migrate_out_requests:
             try:
-                migrated_request = await self._migrate_out_one_request(dst_instance_actor, dst_instance_id, migrate_out_request)
+                if not self.has_migration_slot():
+                    logger.debug(
+                        "Max migration concurrency ({}) reached, reject new migrate out request attempt.".format(
+                            self.max_migration_concurrency
+                        )
+                    )
+                    break
+                if migrate_out_request.is_migrating:
+                    logger.warning(
+                        "Request {} is already migrating out, skip this request.".format(migrate_out_request.request_id)
+                    )
+                    continue
+                # 在此收集所有迁移任务，然后并发（需要提前加入migrating_out_request_id_set）
+                if migrate_out_request.request_id not in self.migrating_out_request_id_set:
+                    self.migrating_out_request_id_set.add(migrate_out_request.request_id)
+                
+                migrate_out_request.is_migrating = True
+                real_migrate_out_requests.append(migrate_out_request)
+                migrate_out_one_request_begin = time.time()
+                logger.info("[LJX] Llumlet._migrate_out_one_request start, {}, timestamps: {}".format(migrate_out_request.request_id, migrate_out_one_request_begin))
+                set_timestamp(migrate_out_request.server_info, "migrate_out_one_request_begin", migrate_out_one_request_begin)
+                tasks.append(self._migrate_out_one_request(dst_instance_actor, dst_instance_id, migrate_out_request))
+                # migrated_request = await self._migrate_out_one_request(dst_instance_actor, dst_instance_id, migrate_out_request)
             # pylint: disable=W0703
             except Exception as e:
                 log_instance_exception(e, dst_instance_id, "migrate_out", migrate_out_request.request_id)
+        # 并发执行所有迁移
+        results = await asyncio.gather(*tasks)
+        for migrated_request, migrate_out_request in zip(results, real_migrate_out_requests):
+            migrate_out_one_request_end = time.time()
+            logger.info("[LJX] Llumlet._migrate_out_one_request end, {}, timestamps: {}".format(migrate_out_request.request_id, migrate_out_one_request_end))
+            logger.info("[LJX] Llumlet._migrate_out_one_request latency: {} ms".format((migrate_out_one_request_end - migrate_out_one_request_begin)*1000))
             migrated_request_list.extend(migrated_request)
-            if len(migrated_request) == 0 and migrate_out_request.eom:
-                break
 
         return migrated_request_list
 
@@ -300,6 +342,7 @@ class MigrationCoordinator:
             return migrated_request
 
         if status == MigrationStatus.FINISHED:
+            set_timestamp(migrate_out_request.server_info, "migrate_out_one_request_end", time.time())
             response = await self._dst_commit_dst_request(dst_instance_actor, dst_instance_id, migrate_out_request)
             if response.success:
                 self.backend_engine.free_src_request(migrate_out_request)
@@ -499,6 +542,7 @@ class MigrationCoordinator:
                                                        token_ids)
         if not response.success:
             # failed to alloc, abort request
+            logger.info("# failed to alloc, abort request {}".format(request_id))
             self.free_pre_alloc_cache(request_id)
 
         return response

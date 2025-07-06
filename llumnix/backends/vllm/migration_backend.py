@@ -55,7 +55,7 @@ class ProxyActor:
             )
         else:
             ret = ray_get_with_timeout(
-                handle.execute_method.remote(*args, **kwargs)
+                handle.execute_method.options(concurrency_group="migate").remote(*args, **kwargs)
             )
 
         return ret

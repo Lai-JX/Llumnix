@@ -531,7 +531,7 @@ class InstanceArgs:
             assert args.instance_type in ['prefill', 'decode'], \
                 "instance type should be prefill or decode if enable_pd_disagg is set."
 
-        assert args.max_migration_concurrency == 1, "Llumnix does not support concurrent migration temporarily."
+        # assert args.max_migration_concurrency == 1, "Llumnix does not support concurrent migration temporarily."
 
     def init_from_engine_args(self, engine_args, backend_type: BackendType):
         if backend_type == BackendType.BLADELLM:
