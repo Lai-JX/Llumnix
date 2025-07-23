@@ -151,7 +151,7 @@ _C.INSTANCE.MIGRATION_LOAD_METRIC = 'remaining_steps'
 # Enable defragmentation through migration based on virtual usage
 _C.INSTANCE.ENABLE_DEFRAG = False
 # Max migration concurrency
-_C.INSTANCE.MAX_MIGRATION_CONCURRENCY = 4
+_C.INSTANCE.MAX_MIGRATION_CONCURRENCY = 8
 # Request migration policy
 _C.INSTANCE.REQUEST_MIGRATION_POLICY = 'SR'
 # Drop migration if the number of stages > migration_max_stages
@@ -161,7 +161,7 @@ _C.INSTANCE.MIGRATION_LAST_STAGE_MAX_BLOCKS = 16
 # Communication backend of migration
 _C.INSTANCE.MIGRATION_BACKEND = "gloo"
 # Number of cache blocks in migration
-_C.INSTANCE.MIGRATION_BUFFER_BLOCKS = 512
+_C.INSTANCE.MIGRATION_BUFFER_BLOCKS = 128 # 512
 # Number of kv-cache layers to transfer in each round during migration
 _C.INSTANCE.MIGRATION_NUM_LAYERS = 1
 # Timeout(s) for initializing migration backend

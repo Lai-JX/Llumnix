@@ -132,6 +132,7 @@ def update_pending_migrate_in_request_decorator(func: Callable):
         is_start = inspect_is_start(func, self, *args, **kwargs)
         is_stop = inspect_is_stop(func)
         request_id = inspect_request_id(func, self, *args, **kwargs)
+        logger.info(f"update pending_migrate_in_request, request_id: {request_id}, func.__name__(async): {func.__name__}")
         if not pre_process_pending_migrate_in_request_time(
             is_start, request_id, self.pending_migrate_in_request_time
         ):
@@ -201,7 +202,7 @@ def update_migrating_in_request_id_set_decorator(func):
 
     def add_migrating_in_request_id_set(self, request_id: RequestIDType):
         if request_id not in self.migrating_in_request_id_set:
-            logger.info(f"Add migrating_in_request_id_set: {request_id}")
+            # logger.info(f"Add migrating_in_request_id_set: {request_id}")
             self.migrating_in_request_id_set.add(request_id)
 
     def remove_migrating_in_request_id_set(self, request_id: RequestIDType):
@@ -212,13 +213,13 @@ def update_migrating_in_request_id_set_decorator(func):
                 logger.warning(f"request_id {request_id} not in migrating_in_request_id_set, "
                                f"but trying to remove it. This may happen when the request is already removed from func free_pre_alloc_cache.(ABORTED_DST)")
             else:
-                logger.info(f"Remove migrating_in_request_id_set: {request_id}")
+                # logger.info(f"Remove migrating_in_request_id_set: {request_id}")
                 self.migrating_in_request_id_set.remove(request_id)
 
     @functools.wraps(func)
     async def async_wrapper(self, *args, **kwargs):
         request_id = inspect_request_id(func, self, *args, **kwargs)
-        logger.info(f"update migrating_in_request_id_set, request_id: {request_id}, func.__name__(async): {func.__name__}")
+        # logger.info(f"update migrating_in_request_id_set, request_id: {request_id}, func.__name__(async): {func.__name__}")
         add_migrating_in_request_id_set(self, request_id)
         try:
             return await func(self, *args, **kwargs)
@@ -228,7 +229,7 @@ def update_migrating_in_request_id_set_decorator(func):
     @functools.wraps(func)
     def sync_wrapper(self, *args, **kwargs):
         request_id = inspect_request_id(func, self, *args, **kwargs)
-        logger.info(f"update migrating_in_request_id_set, request_id: {request_id}, func.__name__(sync): {func.__name__}")
+        # logger.info(f"update migrating_in_request_id_set, request_id: {request_id}, func.__name__(sync): {func.__name__}")
         add_migrating_in_request_id_set(self, request_id)
         try:
             return func(self, *args, **kwargs)

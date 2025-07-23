@@ -54,10 +54,12 @@ class MigrationConfig:
     def __init__(
             self,
             enable_migration: bool,
+            enable_pd_disagg: bool,
             request_migration_policy: str,
             migration_backend: str,
             migration_buffer_blocks: int,
             migration_num_layers: int,
+            max_migration_concurrency: int,
             migration_last_stage_max_blocks: int,
             migration_max_stages: int,
             migration_backend_init_timeout: float,
@@ -65,10 +67,12 @@ class MigrationConfig:
             kvtransfer_migration_backend_naming_url: str = "",
             ) -> None:
         self.enable_migration = enable_migration
+        self.enable_pd_disagg = enable_pd_disagg        # add by ljx
         self.request_migration_policy = request_migration_policy
         self.migration_backend = migration_backend
         self.kvtransfer_migration_backend_transfer_type = kvtransfer_migration_backend_transfer_type
         self.migration_num_layers = migration_num_layers
+        self.max_migration_concurrency = max_migration_concurrency
         self.migration_buffer_blocks = migration_buffer_blocks
         self.migration_last_stage_max_blocks = migration_last_stage_max_blocks
         self.migration_max_stages = migration_max_stages

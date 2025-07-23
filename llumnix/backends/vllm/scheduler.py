@@ -11,6 +11,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import threading
 import time
 import bisect
 from typing import Dict, List, Optional, Tuple, Deque
@@ -67,6 +68,7 @@ class SchedulerLlumnix(Scheduler):
             enable_caching=self.cache_config.enable_prefix_caching)
         self.pre_alloc_cache_dict: Dict[str, BlockTable] = {}
         self.migrating_out_request_last_stage: Dict[str, SequenceGroupLlumnix] = {}
+        self.running_queue_lock = threading.Lock()
 
     def add_update_instance_info_callback(self, update_instance_info_callback):
         self.update_instance_info_callback = update_instance_info_callback
@@ -104,14 +106,37 @@ class SchedulerLlumnix(Scheduler):
         # num_full_slots: The number of tokens currently stored in the blocks.
         # 返回新增块的物理id和新增的token_id
         return blocks[pre_stage_num_blocks:], token_ids[pre_stage_num_blocks * self.block_manager.block_size:block_table.num_full_slots]
+    
+    def free_finished_seq_groups(self) -> None:
+        remaining: Deque[SequenceGroup] = deque()
+        with self.running_queue_lock:
+            for seq_group in self.running:
+                self._free_finished_seq_group(seq_group)
+                if not seq_group.is_finished():
+                    remaining.append(seq_group)
 
+        self.running = remaining
+
+        # Handle async stopped sequence groups
+        # (ones that reached max model len)
+        if self._async_stopped:
+            for seq_group in self._async_stopped:
+                self._free_seq_group_cross_attn_blocks(seq_group)
+                self._finished_requests_ids.append(seq_group.request_id)
+
+                # Free finished seqs
+                self._free_finished_seqs(seq_group)
+
+            self._async_stopped.clear()
+            
     def remove_running_request(self, request_id: str) -> bool:
-        for seq_group in reversed(self.running):
-            if seq_group.request_id == request_id:
-                self.running.remove(seq_group)
-                seq_group.set_status(RequestStatus.RUNNING_MIGRATING)
-                return True
-        return False
+        with self.running_queue_lock:
+            for seq_group in reversed(self.running):
+                if seq_group.request_id == request_id:
+                    self.running.remove(seq_group)
+                    seq_group.set_status(RequestStatus.RUNNING_MIGRATING)
+                    return True
+            return False
 
     def remove_waiting_request(self, request_id: str) -> bool:
         for seq_group in self.waiting:
@@ -162,7 +187,8 @@ class SchedulerLlumnix(Scheduler):
 
     def add_running_request(self, backend_request: LlumnixRequest) -> None:
         self._set_status(backend_request, status_to=SequenceStatus.RUNNING)
-        self.running.append(backend_request)
+        with self.running_queue_lock:
+            self.running.append(backend_request)
 
     def add_waiting_request(self, backend_request: LlumnixRequest) -> None:
         self._set_status(backend_request, status_to=SequenceStatus.WAITING)
@@ -196,6 +222,7 @@ class SchedulerLlumnix(Scheduler):
         block_table = self.pre_alloc_cache_dict.pop(request_id, None)
         if block_table:
             block_table.free()
+        return MigrationResponse(success=True)  # 需要返回，不然修饰器会报错
 
     def free_src_request(self, backend_request: SequenceGroupLlumnix) -> None:
         seq = backend_request.get_seqs()[0]

@@ -6,6 +6,9 @@ export RAY_DEDUP_LOGS=0
 # $3: 实例总数
 # $4: 模型
 # $5: 分布类型
+# $6: qps
+# $7: gpu类型
+# $8: 最大迁移并发数
 TP=$1
 REQ_NUM=$2
 TOTAL_INSTANCES=$3
@@ -14,6 +17,7 @@ DISTRIBUTION=$5     # "burst", "uniform", "poisson", "gamma"
 QPS=${6:-4}
 MODEL_PATH="/share/models/llama-2-7b"
 gputype=${7:-'A6000-t2'}
+max_migration_concurrency=${8:-1}
 
 if [ "$MODEL" == "llama-2-7b" ]; then
     MODEL_PATH="/share/models/llama-2-7b"
@@ -27,6 +31,9 @@ elif [ "$MODEL" == "llama-7b" ]; then
 elif [ "$MODEL" == "llama-13b" ]; then
     MODEL_PATH="/share/models/llama/llama-13b"
     max_request_len=4096
+elif [ "$MODEL" == "llama-30b" ]; then
+    MODEL_PATH="/share/models/llama/llama-30b"
+    max_request_len=8192
 fi
 echo "模型路径: $MODEL_PATH"
 
@@ -52,13 +59,15 @@ generate_instance_combinations() {
 }
 
 Llumnix_benchmark() {
-    return
+    # return
     local count=$1
     filename=$BASE_DIR/benchmark_$((count))\_tp$TP\_$REQ_NUM\_qps_$QPS\_latency_info.json
     if [ -e $filename ]; then
         echo "Llumnix_benchmark already test"
         return
     fi
+    rm $BASE_DIR/serve_$count\_tp$TP\_$REQ_NUM\_qps_$QPS.log
+    rm $BASE_DIR/serve_$count\_tp$TP\_$REQ_NUM\_qps_$QPS\_instance.csv
     port_base=1234
     HEAD_NODE=1 python -u -m llumnix.entrypoints.vllm.api_server \
                     --host 127.0.0.1 \
@@ -67,11 +76,13 @@ Llumnix_benchmark() {
                     --launch-ray-cluster \
                     --model $MODEL_PATH \
                     --worker-use-ray \
+                    --enable-migration \
                     --migration-backend rayrpc \
                     --log-instance-info \
                     --log-request-timestamps \
                     --tensor-parallel-size $TP \
                     --request-output-queue-type zmq \
+                    --max-migration-concurrency $max_migration_concurrency \
                     --log-filename $BASE_DIR/serve_$count\_tp$TP\_$REQ_NUM\_qps_$QPS > $BASE_DIR/serve_$count\_tp$TP\_$REQ_NUM\_qps_$QPS.log 2>&1 &
                     #--request-output-queue-port $(($port_base + 50)) \
     echo $(($port_base + 50))
@@ -89,11 +100,13 @@ Llumnix_benchmark() {
                     --initial-instances 1 \
                     --model $MODEL_PATH \
                     --worker-use-ray \
+                    --enable-migration \
                     --migration-backend rayrpc \
                     --log-instance-info \
                     --log-request-timestamps \
                     --tensor-parallel-size $TP \
                     --request-output-queue-type zmq \
+                    --max-migration-concurrency $max_migration_concurrency \
                     --log-filename $BASE_DIR/serve_$((count + 1))\_tp$TP\_$REQ_NUM\_qps_$QPS > output2.log 2>&1 &
                     #--request-output-queue-port $(($port_base + 50)) \
     done
@@ -129,7 +142,7 @@ Llumnix_benchmark() {
         --log_latencies \
         --fail_on_response_failure \
         --max_request_len $max_request_len \
-        --log_filename $BASE_DIR/benchmark_$((count + 1))\_tp$TP\_$REQ_NUM\_qps_$QPS \
+        --log_filename $BASE_DIR/benchmark_$((count + 1))\_tp$TP\_$REQ_NUM\_qps_$QPS. \
         --prompt_save_path /workspace/llm-serve/Llumnix/benchmark_test/logs/prompts/sharegpt_$MODEL\_$DISTRIBUTION\_$REQ_NUM\_qps_$QPS \
         --qps $QPS 2>&1 | tee -a $BASE_DIR/serve_$((count + 1))\_tp$TP\_$REQ_NUM\_qps_$QPS\_benchmark.log
 
@@ -146,6 +159,8 @@ Llumnix_benchmark_pdd() {
         echo "Llumnix_benchmark_pdd already test"
         return
     fi
+    rm $BASE_DIR/serve_pdd_tp$TP\_$REQ_NUM\_qps_$QPS\_$prefill_count\_$decode_count\_instance.csv
+    rm $BASE_DIR/serve_pdd_tp$TP\_$REQ_NUM\_qps_$QPS\_$prefill_count\_$decode_count.log
     port_base=1234
     HEAD_NODE=1 python -u -m llumnix.entrypoints.vllm.api_server \
                 --host 127.0.0.1 \
@@ -160,10 +175,11 @@ Llumnix_benchmark_pdd() {
                 --log-instance-info \
                 --log-request-timestamps \
                 --tensor-parallel-size $TP \
-                --max-num-seqs $REQ_NUM \
                 --request-output-queue-type zmq \
+                --max-migration-concurrency $max_migration_concurrency \
                 --log-filename $BASE_DIR/serve_pdd_tp$TP\_$REQ_NUM\_qps_$QPS\_$prefill_count\_$decode_count > $BASE_DIR/serve_pdd_tp$TP\_$REQ_NUM\_qps_$QPS\_$prefill_count\_$decode_count.log 2>&1 &
                 #--request-output-queue-port $(($port_base + 50)) \
+                #--max-num-seqs $REQ_NUM \
 
     sleep 15
     # 启动 prefill 实例
@@ -183,11 +199,12 @@ Llumnix_benchmark_pdd() {
                     --enable-migration \
                     --log-instance-info \
                     --log-request-timestamps \
-                    --tensor-parallel-size $TP \
-                    --max-num-seqs $REQ_NUM \
+                    --tensor-parallel-size $TP \                    
                     --request-output-queue-type zmq \
+                    --max-migration-concurrency $max_migration_concurrency \
                     --log-filename $BASE_DIR/serve_pdd_tp$TP\_$REQ_NUM\_qps_$QPS\_$((prefill_count + 1))\_$decode_count > output1.log 2>&1 &
                     #--request-output-queue-port $(($port_base + 50)) \
+                    #--max-num-seqs $REQ_NUM \
     done
     # sleep 10
     # 启动 decode 实例
@@ -208,10 +225,11 @@ Llumnix_benchmark_pdd() {
                     --log-instance-info \
                     --log-request-timestamps \
                     --tensor-parallel-size $TP \
-                    --max-num-seqs $REQ_NUM \
                     --request-output-queue-type zmq \
+                    --max-migration-concurrency $max_migration_concurrency \
                     --log-filename $BASE_DIR/serve_pdd_tp$TP\_$REQ_NUM\_qps_$QPS\_$((prefill_count + 1))\_$decode_count > output2.log 2>&1 &
                     #--request-output-queue-port $(($port + 50)) \
+                    #--max-num-seqs $REQ_NUM \
                     
     done
 
@@ -249,13 +267,13 @@ Llumnix_benchmark_pdd() {
         --log_latencies \
         --fail_on_response_failure \
         --max_request_len $max_request_len \
-        --log_filename $BASE_DIR/benchmark_pdd_tp$TP\_$REQ_NUM\_qps_$QPS\_$((prefill_count + 1))\_$decode_count \
+        --log_filename $BASE_DIR/benchmark_pdd_tp$TP\_$REQ_NUM\_qps_$QPS\_$((prefill_count + 1))\_$decode_count. \
         --prompt_save_path /workspace/llm-serve/Llumnix/benchmark_test/logs/prompts/sharegpt_$MODEL\_$DISTRIBUTION\_$REQ_NUM\_qps_$QPS \
         --qps $QPS  2>&1 | tee -a $BASE_DIR/serve_pdd_tp$TP\_$REQ_NUM\_qps_$QPS\_$((prefill_count + 1))\_$decode_count\_benchmark.log
 
     # 关闭服务
     ./kill.sh
-    sleep 5
+    sleep 15
 }
 echo "参数: TP=$TP, REQ_NUM=$REQ_NUM, TOTAL_INSTANCES=$TOTAL_INSTANCES, MODEL=$MODEL, DISTRIBUTION=$DISTRIBUTION, QPS=$QPS, MODEL_PATH=$MODEL_PATH, BASE_DIR=$BASE_DIR"
 for sm_clock in "${sm_clocks[@]}"; do

@@ -161,7 +161,7 @@ class MigrationWorker(Worker):
             if add_tp:
                 self.migration_backend.recv_cache(request_id, src_worker_handle, src_blocks, dst_blocks, is_last_stage,chunk_size=chunk_size, chunk_rank=chunk_rank)
             else:
-                self.migration_backend.migrate_cache_subtract_tp(src_worker_handle, src_blocks, dst_blocks, request_id, is_last_stage,chunk_size=chunk_size)
+                self.migration_backend.migrate_cache_subtract_tp(request_id, src_worker_handle, src_blocks, dst_blocks, is_last_stage,chunk_size=chunk_size)
             end_time = time.time()
             total_kv_cache_size = len(src_blocks) * CacheEngine.get_cache_block_size(
                 self.cache_config, self.model_config, self.parallel_config)
@@ -179,7 +179,7 @@ class MigrationWorker(Worker):
 
     def do_send(self, *args, request_id: str = None, send_worker_metadata: bool = False, **kwargs):
         if not send_worker_metadata:
-            return self.migration_backend.do_send(*args, **kwargs)
+            return self.migration_backend.do_send(request_id, *args, **kwargs)
         return self.migration_backend.do_send(*args, **kwargs), self._get_seq_group_metadata(request_id)
 
     def _get_seq_group_metadata(self, request_id: str) -> Union[SequenceGroupMetadata, SequenceGroupMetadataDelta]:

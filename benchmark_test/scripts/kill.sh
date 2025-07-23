@@ -13,6 +13,9 @@ kill_all()
 kill_all "RayWorkerWrapper.execute_method"
 kill_all "ray::IDLE"
 kill_all "ray::instance"
+kill_all "ray::Llumlet"
+kill_all "dcgmi"
+
 sleep 1
 kill_all "llumnix"
 # 恢复设置

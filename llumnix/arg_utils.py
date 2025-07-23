@@ -509,6 +509,7 @@ class InstanceArgs:
     # init from manager args
     enable_migration: bool = None
     enable_adaptive_pd: bool = None
+    enable_pd_disagg: bool = None
 
     def __post_init__(self):
         ensure_args_default_none(self)
@@ -549,13 +550,17 @@ class InstanceArgs:
     def init_from_manager_args(self, manager_args: ManagerArgs):
         self.enable_migration = manager_args.enable_migration
         self.enable_adaptive_pd = manager_args.enable_adaptive_pd
+        # add by ljx
+        self.enable_pd_disagg = manager_args.enable_pd_disagg
 
     def create_migration_config(self) -> MigrationConfig:
         migration_config = MigrationConfig(self.enable_migration,
+                                           self.enable_pd_disagg,   # add by ljx
                                            self.request_migration_policy,
                                            self.migration_backend,
                                            self.migration_buffer_blocks,
                                            self.migration_num_layers,
+                                           self.max_migration_concurrency,
                                            self.migration_last_stage_max_blocks,
                                            self.migration_max_stages,
                                            self.migration_backend_init_timeout,

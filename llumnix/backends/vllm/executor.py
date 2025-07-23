@@ -74,12 +74,13 @@ class LlumnixRayGPUExecutor(RayGPUExecutorAsync):
                 placement_group_capture_child_tasks=True,
                 placement_group_bundle_index=bundle_id
             )
+            max_migration_concurrency = self.migration_config.max_migration_concurrency
             worker = ray.remote(
                 num_cpus=0,
                 num_gpus=num_gpus,
                 scheduling_strategy=scheduling_strategy,
                 max_concurrency=2,
-                concurrency_groups={"migate": 8, },
+                concurrency_groups={"migate": 2*max_migration_concurrency, },
                 name=f"worker_{self.instance_id}_{random_uuid()}",
                 **ray_remote_kwargs,
             )(RayWorkerWrapper).remote(**worker_wrapper_kwargs)

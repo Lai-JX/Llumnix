@@ -225,7 +225,8 @@ class LLMEngineLlumnix(_AsyncLLMEngine):
 
         if not self.disable_async_output_proc:
             while self._output_proc_done_event_queue.qsize() > 0:
-                output_proc_done_event = self._output_proc_done_event_queue.get()
+                request_id, output_proc_done_event = self._output_proc_done_event_queue.get()
+                logger.debug(f'req {request_id} finished output proc in src instance.')
                 output_proc_done_event.set()
 
     async def _process_request_outputs(
@@ -242,7 +243,8 @@ class LLMEngineLlumnix(_AsyncLLMEngine):
         set_timestamp(request_outputs, 'engine_step_timestamp_begin', self.step_begin_time)
         set_timestamp(request_outputs, 'engine_step_timestamp_end', time.time())
         for request_output, server_info in zip(request_outputs, server_infos):
-            if server_info.request_timestamps.migrate_out_one_request_end == 0.0:
+            enable_pd_disagg = self.model_executor.migration_config.enable_pd_disagg
+            if enable_pd_disagg and server_info.request_timestamps.migrate_out_one_request_end == 0.0:
                 logger.info("[LJX] LLMEngineLlumnix._process_request_outputs engine_step_timestamp_end, {}, timestamps: {}".format(request_output.request_id, time.time()))
 
         for request_output in request_outputs:
@@ -262,11 +264,12 @@ class LLMEngineLlumnix(_AsyncLLMEngine):
             tot_blocks = []
             for seq in seq_groups[-1].get_seqs(SequenceStatus.RUNNING):
                 # temporary log to catch unfixed bug
+                blocks = []
                 try:
                     blocks = self.scheduler[0].block_manager.get_block_table(seq)
                 except KeyError:
                     logger.exception(
-                        "Error in scheduler get_block_table (seq_id: {}, request_id: {})".format(
+                        "Error in scheduler get_block_table (seq_id: {}, request_id: {},(maybe request has finished?))".format(
                             seq.seq_id, seq_groups[-1].request_id
                         )
                     )
@@ -534,12 +537,13 @@ class BackendVLLM(BackendInterface):
     async def remove_running_request(self, request_id: str) -> bool:
         step_done_event = asyncio.Event()
         self._step_done_event_queue.put((request_id, step_done_event))
-        await step_done_event.wait()
+        await step_done_event.wait()        # 等待请求终止
         ret = self._remove_running_request_ret.pop(request_id)
         if not self.disable_async_output_proc:
             output_proc_done_event = asyncio.Event()
-            self._output_proc_done_event_queue.put(output_proc_done_event)
-            await output_proc_done_event.wait()
+            self._output_proc_done_event_queue.put((request_id,output_proc_done_event))
+            asyncio.sleep(0.0)
+            await output_proc_done_event.wait() # 等待请求的输出完成
         return ret
 
     def _remove_running_request(self, request_id: str) -> bool:

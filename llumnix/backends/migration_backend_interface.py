@@ -55,9 +55,9 @@ class MigrationBackendBase(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def do_send(self, dst_worker_handle: ray.actor.ActorHandle, blocks: List[int], virtuel_engine: int,  chunk_size: int=1, chunk_rank: int=0):
+    def do_send(self, request_id, dst_worker_handle: ray.actor.ActorHandle, blocks: List[int], virtuel_engine: int,  chunk_size: int=1, chunk_rank: int=0):
         raise NotImplementedError
 
     @abstractmethod
-    def do_recv(self, src_worker_handle: ray.actor.ActorHandle, blocks: List[int], virtuel_engine: int):
+    def do_recv(self, request_id, src_worker_handle: ray.actor.ActorHandle, blocks: List[int], virtuel_engine: int):
         raise NotImplementedError

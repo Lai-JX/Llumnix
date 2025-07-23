@@ -17,6 +17,7 @@ import time
 from typing import List, Tuple, Optional, Callable, Any
 
 from llumnix.backends.utils import BarrierActor
+from llumnix.backends.vllm.parallel_migration_backend import MigrationBackendResourcPool
 import torch
 from func_timeout import func_set_timeout
 import ray
@@ -71,6 +72,7 @@ class RayRpcMigrationBackend(MigrationBackendBase):
                  cache_engine: List[CacheEngine],
                  worker_rank: int,
                  worker_handle_list: List[ray.actor.ActorHandle],
+                 local_rank: int,
                  scheduling_strategy: PlacementGroupSchedulingStrategy,
                  is_driver_worker: bool,
                  gpu_cache: Optional[List[List[torch.Tensor]]],
@@ -84,8 +86,12 @@ class RayRpcMigrationBackend(MigrationBackendBase):
 
         self.worker_rank = worker_rank
         self.worker_handle_list = worker_handle_list
+        self.local_rank = local_rank
+
+        max_migration_concurrency = self.migration_config.max_migration_concurrency
         self.proxy_actor = ProxyActor.options(
             scheduling_strategy=scheduling_strategy,
+            max_concurrency = max_migration_concurrency*2,
             name=f"ProxyActor_{self.instance_id}_{random_uuid()}").remote(
                 is_driver_worker, use_ray_spmd_worker
             )
@@ -105,16 +111,23 @@ class RayRpcMigrationBackend(MigrationBackendBase):
         self.num_layers = self.cache_engine[0].num_attention_layers
         self.migration_cache_size = self.cache_engine[0].block_size * self.cache_engine[0].num_kv_heads * self.cache_engine[0].head_size
 
-        self.dummy_cache = torch.empty(
-            size=(self.num_migration_buffer_blocks, self.num_layers, 2, self.migration_cache_size),
-            dtype=self.cache_engine[0].dtype,
-            device=self.cache_device,
-            pin_memory=True
-        )
-        self.migration_stream = torch.cuda.Stream()
-        self.send_cache_split = None
-        self.barrier_actor = None
-        self.wait_for_split_event = threading.Event()
+        self.buffer_pool = MigrationBackendResourcPool((self.num_migration_buffer_blocks, self.num_layers, 2, self.migration_cache_size),
+                                                       self.cache_engine[0].dtype,
+                                                       self.cache_device,
+                                                       self.local_rank,
+                                                       max_migration_concurrency,)
+        logger.info(f"buffer size {max_migration_concurrency} * {(self.num_migration_buffer_blocks, self.num_layers, 2, self.cache_engine[0].block_size, self.cache_engine[0].num_kv_heads, self.cache_engine[0].head_size)} * {self.cache_engine[0].dtype}")
+        self.request_id_buffer = {}
+        # self.dummy_cache = torch.empty(
+        #     size=(self.num_migration_buffer_blocks, self.num_layers, 2, self.migration_cache_size),
+        #     dtype=self.cache_engine[0].dtype,
+        #     device=self.cache_device,
+        #     pin_memory=True
+        # )
+        # self.migration_stream = torch.cuda.Stream()
+        # self.send_cache_split = None
+        # self.barrier_actor = None
+        # self.wait_for_split_event = threading.Event()
 
     def init_backend(self, group_name: str, world_size: int, rank: int) -> bool:
         logger.info("Create rayrpc migration backend successfully.")
@@ -171,7 +184,7 @@ class RayRpcMigrationBackend(MigrationBackendBase):
                 chunk_size=chunk_size, chunk_rank=chunk_rank
             )
             if rpc_numpy_cache is not None:
-                self.do_recv(rpc_numpy_cache, recv_blocks)
+                self.do_recv(request_id, rpc_numpy_cache, recv_blocks)
             recv_blocks = dst_blocks[start_idx:start_idx+offset]
 
             if send_worker_metadata:
@@ -179,16 +192,16 @@ class RayRpcMigrationBackend(MigrationBackendBase):
             else:
                 rpc_numpy_cache = ray_get_with_timeout(ray_obj)
 
-        self.do_recv(rpc_numpy_cache, recv_blocks)
+        self.do_recv(request_id, rpc_numpy_cache, recv_blocks)
         if src_seq_group_metadata:
             self.worker_stage_seq_group_metadata_callback(request_id, src_seq_group_metadata)
         # ray.get(self.barrier_actor.arrive.remote())
 
     def migrate_cache_subtract_tp(self,
+                                  request_id: str,
                       src_handle: List["ray.actor.ActorHandle"],
                       src_blocks: List[int],
                       dst_blocks: List[int],
-                      request_id: str,
                       is_last_stage: bool,
                       chunk_size: int=1) -> None:
         tot_blocks = len(src_blocks)
@@ -238,15 +251,18 @@ class RayRpcMigrationBackend(MigrationBackendBase):
         if src_seq_group_metadata:
             self.worker_stage_seq_group_metadata_callback(request_id, src_seq_group_metadata)
 
-    def do_send(self, dst_handle: "ray.actor.ActorHandle", blocks: List[int], virtuel_engine: int=0, chunk_size=1, chunk_rank=0):
+    def do_send(self, request_id, dst_handle: "ray.actor.ActorHandle", blocks: List[int], virtuel_engine: int=0, chunk_size=1, chunk_rank=0):
         num_blocks = len(blocks)
         ss = time.time()
         if chunk_rank == 0:
             ss = time.time()
+            buffer = self.buffer_pool.acquire()
+            self.request_id_buffer[request_id] = buffer
             if chunk_size > 1:
                 # self.barrier_actor = BarrierActor.options().remote(chunk_size)
-                self.barrier = threading.Barrier(chunk_size)
-            send_cache = self.dummy_cache[:num_blocks].view(self.num_layers, 2, num_blocks, self.migration_cache_size)
+                buffer.barrier = threading.Barrier(chunk_size)
+            send_cache = buffer.dummy_cache[:num_blocks].view(self.num_layers, 2, num_blocks, self.migration_cache_size)
+            # send_cache = self.dummy_cache[:num_blocks].view(self.num_layers, 2, num_blocks, self.migration_cache_size)
             # src_to_dst = {block_num: idx for idx, block_num in enumerate(blocks)}
             src_to_dst: List[Tuple[int, int]] = []
             for idx in range(num_blocks):
@@ -256,13 +272,16 @@ class RayRpcMigrationBackend(MigrationBackendBase):
                                                 device="cpu", pin_memory=True).view(-1, 2)
             logger.info(f"time[do_send][{chunk_rank}] before swap_blocks : {time.time()-ss}")
         if chunk_rank == 0:
-            with torch.cuda.stream(self.migration_stream):
+            with torch.cuda.stream(buffer.migration_stream):
                 for layer_idx in range(self.num_layers):
                     self.cache_engine[virtuel_engine].attn_backend \
                         .swap_blocks(self.gpu_cache[virtuel_engine][layer_idx], send_cache[layer_idx], block_mapping_tensor)
-            torch.cuda.Stream.synchronize(self.migration_stream)
+            torch.cuda.Stream.synchronize(buffer.migration_stream)
             if chunk_size == 1:
-                return send_cache.to(self.rpc_dtype).numpy()
+                ret = send_cache.to(self.rpc_dtype).numpy()
+                del self.request_id_buffer[request_id]
+                self.buffer_pool.release(buffer)
+                return ret
             logger.info(f"time[do_send][{chunk_rank}] after swap_blocks : {time.time()-ss}")
             # logger.info("shape before split: {}".format(send_cache.shape))
             send_cache = send_cache.view(
@@ -273,30 +292,38 @@ class RayRpcMigrationBackend(MigrationBackendBase):
             )
             logger.info(f"time[do_send][{chunk_rank}] after view : {time.time()-ss}")
             # 按照num_kv_heads所在维度进行划分
-            self.send_cache_split = list(torch.chunk(send_cache, chunk_size, dim=4))
+            buffer.send_cache_split = list(torch.chunk(send_cache, chunk_size, dim=4))
             logger.info(f"time[do_send][{chunk_rank}] after split : {time.time()-ss}")
             # logger.info("shape after split: {} + {}; {}".format(self.send_cache_split[0].shape,self.send_cache_split[1].shape,self.migration_cache_size // chunk_size))
             if chunk_size > 1:
-                self.wait_for_split_event.set()
+                buffer.wait_for_split_event.set()
         else:
             # 等待划分完成
-            self.wait_for_split_event.wait()
+            while True:
+                # 根据requst_id获取buffer
+                buffer = self.request_id_buffer.get(request_id)
+                logger.info(f'can not find buffer for {request_id}')
+                if buffer is not None:
+                    break
+            buffer.wait_for_split_event.wait()
         logger.info(f"time[do_send][{chunk_rank}] split finished and all process begin : {time.time()-ss}")
         
         # logger.info("shape after split[{}]: {} + {}; {}".format(chunk_rank,self.send_cache_split[0].shape,self.send_cache_split[1].shape,self.migration_cache_size // chunk_size))
-        self.send_cache_split[chunk_rank] = self.send_cache_split[chunk_rank].reshape(
+        buffer.send_cache_split[chunk_rank] = buffer.send_cache_split[chunk_rank].reshape(
             self.num_layers, 2, num_blocks, self.migration_cache_size // chunk_size
         )
         logger.info(f"time[do_send][{chunk_rank}] process reshape : {time.time()-ss}")
         # ray.get(self.barrier_actor.arrive.remote())
-        self.barrier.wait()
+        buffer.barrier.wait()
         logger.info(f"time[do_send][{chunk_rank}] after barrier_actor : {time.time()-ss}")
         if chunk_rank == 0 and chunk_size > 1:
-            self.wait_for_split_event.clear()
-        return self.send_cache_split[chunk_rank].to(self.rpc_dtype).numpy()
+            buffer.wait_for_split_event.clear()
+            self.buffer_pool.release(buffer)
+            del self.request_id_buffer[request_id]
+        return buffer.send_cache_split[chunk_rank].to(self.rpc_dtype).numpy()
 
     # pylint: disable=arguments-differ
-    def do_recv(self, src_worker_handle: ray.actor.ActorHandle, blocks: List[int], virtuel_engine: int=0) -> None:
+    def do_recv(self, request_id, src_worker_handle: ray.actor.ActorHandle, blocks: List[int], virtuel_engine: int=0) -> None:
         num_blocks = len(blocks)
         # src_to_dst = dict(enumerate(blocks))
         src_to_dst: List[Tuple[int, int]] = []
@@ -305,15 +332,19 @@ class RayRpcMigrationBackend(MigrationBackendBase):
         block_mapping_tensor = torch.tensor(src_to_dst,
                                             dtype=torch.int64,
                                             device="cpu", pin_memory=True).view(-1, 2)
-        recv_cache = self.dummy_cache[:num_blocks].view(self.num_layers, 2, num_blocks, self.migration_cache_size)
+        buffer = self.buffer_pool.acquire()
+        self.request_id_buffer[request_id] = buffer
+        recv_cache = buffer.dummy_cache[:num_blocks].view(self.num_layers, 2, num_blocks, self.migration_cache_size)
         # use pin memory dummy_cache to speed up data transfer
         recv_cache.copy_(torch.from_numpy(src_worker_handle))
 
-        with torch.cuda.stream(self.migration_stream):
+        with torch.cuda.stream(buffer.migration_stream):
             for layer_idx in range(self.num_layers):
                 self.cache_engine[virtuel_engine].attn_backend \
                     .swap_blocks(recv_cache[layer_idx], self.gpu_cache[virtuel_engine][layer_idx], block_mapping_tensor)
-        torch.cuda.Stream.synchronize(self.migration_stream)
+        torch.cuda.Stream.synchronize(buffer.migration_stream)
+        del self.request_id_buffer[request_id]
+        self.buffer_pool.release(buffer)
 
 
 def try_import_gloo():
@@ -336,12 +367,13 @@ class RayColMigrationBackend(MigrationBackendBase):
                  migration_config: MigrationConfig,
                  cache_engine: List[CacheEngine],
                  local_rank: int,
+                 worker_rank: int,
                  scheduling_strategy: PlacementGroupSchedulingStrategy,
                  is_driver_worker: bool,
                  gpu_cache: Optional[List[List[torch.Tensor]]],
                  use_ray_spmd_worker: bool,
                  worker_stage_seq_group_metadata_callback: Callable,
-                 worker_rank: int) -> None:
+                 ) -> None:
         super().__init__()
 
         # pylint: disable=C0415
@@ -696,18 +728,20 @@ def get_migration_backend(instance_id: str,
                                                           migration_config,
                                                           cache_engine,
                                                           local_rank,
+                                                          worker_rank,
                                                           scheduling_strategy,
                                                           is_driver_worker,
                                                           gpu_cache,
                                                           use_ray_spmd_worker,
                                                           worker_stage_seq_group_metadata_callback,
-                                                          worker_rank)
+                                                          )
     else:
         target_migration_backend = RayRpcMigrationBackend(instance_id,
                                                           migration_config,
                                                           cache_engine,
                                                           worker_rank,
                                                           worker_handle_list,
+                                                          local_rank,
                                                           scheduling_strategy,
                                                           is_driver_worker,
                                                           gpu_cache,

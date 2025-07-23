@@ -8,6 +8,7 @@ export RAY_DEDUP_LOGS=0
 # $5: 分布类型
 # $6: qps
 # $7: log_dir_prefix
+# $8: 最大迁移并发数
 PREFILL_TPS_STR=${1:-"1,1"}
 DECODE_TPS_STR=${2:-"2"}
 IFS=',' read -ra PREFILL_TPS <<< "$PREFILL_TPS_STR"
@@ -17,6 +18,7 @@ MODEL=$4
 DISTRIBUTION=$5     # "burst", "uniform", "poisson", "gamma"
 QPS=${6:-4}
 log_dir_prefix=${7:-"l40-pdd-hetero"}  # 默认值为 "l40-pdd-hetero"
+max_migration_concurrency=${8:-1}
 
 MODEL_PATH="/share/models/llama-2-7b"
 
@@ -52,6 +54,8 @@ Llumnix_benchmark_pdd() {
         echo "Llumnix_benchmark_pdd($filename) already test"
         return
     fi
+    rm $BASE_DIR/serve_pdd\_$REQ_NUM\_qps_$QPS\_$PREFILL_TPS_STR\_$DECODE_TPS_STR.log
+    $BASE_DIR/serve_pdd\_$REQ_NUM\_qps_$QPS\_$PREFILL_TPS_STR\_$DECODE_TPS_STR\_instance.csv
     # 遍历 prefill_dps 和 decode_dps
     TP=0
     count=0
@@ -75,6 +79,8 @@ Llumnix_benchmark_pdd() {
                 --log-request-timestamps \
                 --tensor-parallel-size $TP \
                 --max-num-seqs $REQ_NUM \
+                --request-output-queue-type zmq \
+                --max-migration-concurrency $max_migration_concurrency \
                 --log-filename $BASE_DIR/serve_pdd\_$REQ_NUM\_qps_$QPS\_$PREFILL_TPS_STR\_$DECODE_TPS_STR > $BASE_DIR/serve_pdd\_$REQ_NUM\_qps_$QPS\_$PREFILL_TPS_STR\_$DECODE_TPS_STR.log 2>&1 &
             sleep 15
         else
@@ -93,10 +99,12 @@ Llumnix_benchmark_pdd() {
                 --log-request-timestamps \
                 --tensor-parallel-size $TP \
                 --max-num-seqs $REQ_NUM \
+                --request-output-queue-type zmq \
+                --max-migration-concurrency $max_migration_concurrency \
                 --log-filename $BASE_DIR/serve_pdd\_$REQ_NUM\_qps_$QPS\_$PREFILL_TPS_STR\_$DECODE_TPS_STR > output1.log 2>&1 &
         fi
     done
-    
+
     # 启动 decode 实例
     count=0
     for decode_dp in "${DECODE_TPS[@]}"; do
@@ -119,6 +127,8 @@ Llumnix_benchmark_pdd() {
             --log-request-timestamps \
             --tensor-parallel-size $TP \
             --max-num-seqs $REQ_NUM \
+            --request-output-queue-type zmq \
+            --max-migration-concurrency $max_migration_concurrency \
             --log-filename $BASE_DIR/serve_pdd\_$REQ_NUM\_qps_$QPS\_$PREFILL_TPS_STR\_$DECODE_TPS_STR > output2.log 2>&1 &
         
     done
@@ -135,9 +145,20 @@ Llumnix_benchmark_pdd() {
         fi
     done
 
+    # 构造所有 prefill 和 decode 实例端口的ip_ports参数
+    ip_ports="$HEAD_NODE_IP:1234"
+    for ((i=1; i < ${#PREFILL_TPS[@]}; i++)); do
+        ip_ports="$ip_ports $HEAD_NODE_IP:$((1234 + i))"
+    done
+    ip_ports="$ip_ports $HEAD_NODE_IP:1244"
+    for ((i=1; i < ${#DECODE_TPS[@]}; i++)); do
+        ip_ports="$ip_ports $HEAD_NODE_IP:$((1244 + i))"
+    done
+    echo "ip_ports: $ip_ports"
+
     # 添加负载
     python -u /workspace/llm-serve/Llumnix/benchmark/benchmark_serving.py \
-        --ip_ports $HEAD_NODE_IP:1234 \
+        --ip_ports $ip_ports \
         --tokenizer $MODEL_PATH \
         --random_prompt_count $REQ_NUM \
         --dataset_type "sharegpt" \
