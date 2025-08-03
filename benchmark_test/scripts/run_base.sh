@@ -38,19 +38,20 @@ prompt_len=${9:-""}
 response_len=${10:-""}
 
 MODEL_PATH="/share/models/llama-2-7b"
+MIGRATION_BACKEND="nccl"       # rayrpc
 
 if [ "$MODEL" == "llama-2-7b" ]; then
     MODEL_PATH="/share/models/llama-2-7b"
-    max_request_len=2048
+    max_request_len=-1 # 2048 让benchmark_serving.py自动获取
 elif [ "$MODEL" == "llama-2-13b" ]; then
     MODEL_PATH="/share/models/llama-2-13b"
-    max_request_len=4096
+    max_request_len=-1 # 4096 让benchmark_serving.py自动获取
 elif [ "$MODEL" == "llama-7b" ]; then
     MODEL_PATH="/share/models/llama/llama-7b"
-    max_request_len=2048
+    max_request_len=-1 # 2048 让benchmark_serving.py自动获取
 elif [ "$MODEL" == "llama-13b" ]; then
     MODEL_PATH="/share/models/llama/llama-13b"
-    max_request_len=4096
+    max_request_len=-1 # 4096 让benchmark_serving.py自动获取
 fi
 echo "模型路径: $MODEL_PATH"
 
@@ -84,7 +85,7 @@ Llumnix_benchmark() {
                     --model $MODEL_PATH \
                     --worker-use-ray \
                     --enable-migration \
-                    --migration-backend rayrpc \
+                    --migration-backend $MIGRATION_BACKEND \
                     --log-instance-info \
                     --log-request-timestamps \
                     --tensor-parallel-size $TP \
@@ -107,7 +108,7 @@ Llumnix_benchmark() {
                     --model $MODEL_PATH \
                     --worker-use-ray \
                     --enable-migration \
-                    --migration-backend rayrpc \
+                    --migration-backend $MIGRATION_BACKEND \
                     --log-instance-info \
                     --log-request-timestamps \
                     --tensor-parallel-size $TP \
@@ -154,7 +155,7 @@ Llumnix_benchmark() {
             --prompt_save_path /workspace/llm-serve/Llumnix/benchmark_test/logs/prompts/sharegpt_$MODEL\_$DISTRIBUTION\_$REQ_NUM\_qps_$QPS \
             --qps $QPS 2>&1 | tee -a $BASE_DIR/serve_$((count + 1))\_tp$TP\_$REQ_NUM\_qps_$QPS\_benchmark.log
     else
-        echo "Using random prompts with prompt_len: $prompt_len and response_len: $response"
+        echo "Using random prompts with prompt_len: $prompt_len and response_len: $response_len"
         python -u /workspace/llm-serve/Llumnix/benchmark/benchmark_serving.py \
             --ip_ports $ip_ports \
             --tokenizer $MODEL_PATH \
@@ -187,7 +188,7 @@ Llumnix_benchmark_pdd() {
         return
     fi
     rm $BASE_DIR/serve_pdd\_$REQ_NUM\_qps_$QPS\_$PREFILL_TPS_STR\_$DECODE_TPS_STR.log
-    $BASE_DIR/serve_pdd\_$REQ_NUM\_qps_$QPS\_$PREFILL_TPS_STR\_$DECODE_TPS_STR\_instance.csv
+    rm $BASE_DIR/serve_pdd\_$REQ_NUM\_qps_$QPS\_$PREFILL_TPS_STR\_$DECODE_TPS_STR\_instance.csv
     # 遍历 prefill_dps 和 decode_dps
     TP=0
     count=0
@@ -205,12 +206,13 @@ Llumnix_benchmark_pdd() {
                 --enable-pd-disagg --instance-type prefill \
                 --model $MODEL_PATH \
                 --worker-use-ray \
-                --migration-backend rayrpc \
+                --migration-backend $MIGRATION_BACKEND \
                 --enable-migration \
                 --log-instance-info \
                 --log-request-timestamps \
                 --tensor-parallel-size $TP \
                 --request-output-queue-type zmq \
+                --max-num-seqs 512 \
                 --max-migration-concurrency $max_migration_concurrency \
                 --log-filename $BASE_DIR/serve_pdd\_$REQ_NUM\_qps_$QPS\_$PREFILL_TPS_STR\_$DECODE_TPS_STR > $BASE_DIR/serve_pdd\_$REQ_NUM\_qps_$QPS\_$PREFILL_TPS_STR\_$DECODE_TPS_STR.log 2>&1 &
                 # --max-num-seqs $REQ_NUM \
@@ -225,12 +227,13 @@ Llumnix_benchmark_pdd() {
                 --enable-pd-disagg --instance-type prefill \
                 --model $MODEL_PATH \
                 --worker-use-ray \
-                --migration-backend rayrpc \
+                --migration-backend $MIGRATION_BACKEND \
                 --enable-migration \
                 --log-instance-info \
                 --log-request-timestamps \
                 --tensor-parallel-size $TP \
                 --request-output-queue-type zmq \
+                --max-num-seqs 512 \
                 --max-migration-concurrency $max_migration_concurrency \
                 --log-filename $BASE_DIR/serve_pdd\_$REQ_NUM\_qps_$QPS\_$PREFILL_TPS_STR\_$DECODE_TPS_STR > output1.log 2>&1 &
                 # --max-num-seqs $REQ_NUM \
@@ -253,12 +256,13 @@ Llumnix_benchmark_pdd() {
             --enable-pd-disagg --instance-type decode \
             --model $MODEL_PATH \
             --worker-use-ray \
-            --migration-backend rayrpc \
+            --migration-backend $MIGRATION_BACKEND \
             --enable-migration \
             --log-instance-info \
             --log-request-timestamps \
             --tensor-parallel-size $TP \
             --request-output-queue-type zmq \
+            --max-num-seqs 512 \
             --max-migration-concurrency $max_migration_concurrency \
             --log-filename $BASE_DIR/serve_pdd\_$REQ_NUM\_qps_$QPS\_$PREFILL_TPS_STR\_$DECODE_TPS_STR > output2.log 2>&1 &
             # --max-num-seqs $REQ_NUM \
@@ -305,7 +309,7 @@ Llumnix_benchmark_pdd() {
             --prompt_save_path /workspace/llm-serve/Llumnix/benchmark_test/logs/prompts/sharegpt_$MODEL\_$DISTRIBUTION\_$REQ_NUM\_qps_$QPS \
             --qps $QPS
     else
-        echo "Using random prompts with prompt_len: $prompt_len and response_len: $response"
+        echo "Using random prompts with prompt_len: $prompt_len and response_len: $response_len"
         python -u /workspace/llm-serve/Llumnix/benchmark/benchmark_serving.py \
             --ip_ports $ip_ports \
             --tokenizer $MODEL_PATH \

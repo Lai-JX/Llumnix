@@ -34,7 +34,7 @@ from vllm import envs as vllm_envs
 
 from llumnix.arg_utils import InstanceArgs, LlumnixEngineArgs
 from llumnix.logging.logger import init_logger
-from llumnix.instance_info import InstanceInfo
+from llumnix.instance_info import InstanceInfo, InstanceType
 from llumnix.backends.backend_interface import BackendInterface
 from llumnix.backends.vllm.scheduler import SchedulerLlumnix
 from llumnix.backends.vllm.sequence import SequenceGroupLlumnix, RequestStatus
@@ -75,6 +75,7 @@ class LLMEngineLlumnix(_AsyncLLMEngine):
                  backend_type: BackendType,
                  request_output_forwarding_mode: RequestOutputForwardingMode,
                  abort_request_callback: Coroutine,
+                 instance_type: InstanceType = None,
                  *arg, **kwargs) -> None:
         # pylint: disable=import-outside-toplevel
         import vllm.outputs
@@ -92,6 +93,7 @@ class LLMEngineLlumnix(_AsyncLLMEngine):
             backend_type,
         )
         self.disable_async_output_proc = disable_async_output_proc
+        self.instance_type = instance_type
 
         self._start_gpu_monitor()
 
@@ -108,7 +110,8 @@ class LLMEngineLlumnix(_AsyncLLMEngine):
         request_output_forwarding_mode: RequestOutputForwardingMode,
         abort_request_callback: Coroutine,
         latency_mem: Optional[LatencyMemData] = None,
-        usage_context: UsageContext = UsageContext.ENGINE_CONTEXT
+        usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
+        instance_type: InstanceType = None,
     ) -> "LLMEngineLlumnix":
         """Creates an LLM engine from the engine arguments."""
         # Create the engine configs.
@@ -141,6 +144,7 @@ class LLMEngineLlumnix(_AsyncLLMEngine):
             executor_class=executor_class,
             log_stats=not engine_args.disable_log_stats,
             usage_context=usage_context,
+            instance_type=instance_type,
         )
         return engine
 
@@ -158,6 +162,10 @@ class LLMEngineLlumnix(_AsyncLLMEngine):
         logger.info(f"worker_device_ids: {worker_device_ids};")
         self.gpuMpnitor = GPUMonitor(worker_device_ids, 1000, 10)
         self.gpuMpnitor.start()
+        if self.instance_type == InstanceType.PREFILL:
+            self.gpuMpnitor.set_frequency(2100, 7601)
+        elif self.instance_type == InstanceType.DECODE:
+            self.gpuMpnitor.set_frequency(1080, 8001)
 
     def _update_gpu_mertics(self, instance_info: Optional[InstanceInfo] = None) -> None:
         if self.gpuMpnitor and instance_info:
@@ -241,11 +249,12 @@ class LLMEngineLlumnix(_AsyncLLMEngine):
             server_infos = list(server_infos)
 
         set_timestamp(request_outputs, 'engine_step_timestamp_begin', self.step_begin_time)
-        set_timestamp(request_outputs, 'engine_step_timestamp_end', time.time())
+        engine_step_timestamp_end = time.time()
+        set_timestamp(request_outputs, 'engine_step_timestamp_end', engine_step_timestamp_end)
         for request_output, server_info in zip(request_outputs, server_infos):
             enable_pd_disagg = self.model_executor.migration_config.enable_pd_disagg
             if enable_pd_disagg and server_info.request_timestamps.migrate_out_one_request_end == 0.0:
-                logger.info("[LJX] LLMEngineLlumnix._process_request_outputs engine_step_timestamp_end, {}, timestamps: {}".format(request_output.request_id, time.time()))
+                logger.info("[LJX] LLMEngineLlumnix._process_request_outputs engine_step_timestamp_end, {}, timestamps: {}, step_id{}, num_seqs:{}, tokens:{} cost:{}".format(request_output.request_id, engine_step_timestamp_end, self.instance_info.step_id, self.instance_info.num_seqs, self.instance_info.num_batched_tokens, engine_step_timestamp_end-self.step_begin_time))
 
         for request_output in request_outputs:
             if request_output.finished:
@@ -314,6 +323,7 @@ class LLMEngineLlumnix(_AsyncLLMEngine):
         self.step_begin_time = time.time()
         # pylint: disable=too-many-function-args
         outputs = await super().step_async(0)
+        # outputs = await self.step_async_super(0)
         return await self._process_request_outputs(outputs)
 
     def stop(self) -> None:
@@ -363,6 +373,7 @@ class BackendVLLM(BackendInterface):
             backend_type=BackendType.VLLM,
             request_output_forwarding_mode=instance_args.request_output_forwarding_mode,
             abort_request_callback=self.abort_request,
+            instance_type=instance_args.instance_type,
         )
         # In order to call the verify_async_output_proc implicitly.
         engine_config = engine_args.create_engine_config()

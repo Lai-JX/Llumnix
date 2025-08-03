@@ -719,7 +719,7 @@ def sample_arxiv_request(
                 break
     return prompts, prompt_lens, response_lens
 
-def get_max_request_len(tokenizer, max_request_len):
+def get_max_request_len(tokenizer, arg_max_request_len):
     # 直接通过 tokenizer 获取
     tokenizer_tmp = AutoTokenizer.from_pretrained(tokenizer, trust_remote_code=True)
 
@@ -733,7 +733,7 @@ def get_max_request_len(tokenizer, max_request_len):
         # 尝试不同参数名
         max_request_len = getattr(config, "max_position_embeddings", None)
         if max_request_len is None:
-            max_request_len = getattr(config, "n_positions", max_request_len)  # 默认值可选
+            max_request_len = getattr(config, "n_positions", arg_max_request_len)  # 默认值可选
     return max_request_len
 
 def warm_up(backend, tokenizer, prompts, args):

@@ -193,3 +193,7 @@ logs/analysis/result
 logs/analysis/*.png
 scripts/*.log
 benchmark_test/logs
+benchmark_test/analysis/results
+benchmark_test/analysis/tmp
+benchmark_test/analysis/*.txt
+benchmark_test/analysis/*.png

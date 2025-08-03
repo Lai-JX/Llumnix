@@ -20,7 +20,7 @@ class InstanceMetricsAnalysis:
         for inference_type in group['inference_type']:
             if not pd.isna(inference_type) and inference_type != None:
                 return inference_type
-    def get_sm_active(self, group):
+    def get_gpu_msg(self, group, metric='sm_active'):
         group = group[group['sm_active'] != "[]"].copy()
         group['sm_active'] = group['sm_active'].apply(
                         lambda x: x[0] if isinstance(x, list) and len(x) == 1 else (mean(literal_eval(x)) if isinstance(x, str) and x.startswith('[') else x)
@@ -33,7 +33,7 @@ class InstanceMetricsAnalysis:
         group = group.copy()
         if filter_prefill:
             group = group[group['inference_type'] == 'prefill']
-        group['bs'] = group['bs'].astype(float)
+        group['running_seq_lens'] = group['running_seq_lens'].astype(float)
         group['num_available_gpu_blocks'] = group['num_available_gpu_blocks'].astype(int)
         max_blocks = group['num_available_gpu_blocks'].max()
         # 计算分母
@@ -42,11 +42,31 @@ class InstanceMetricsAnalysis:
         denominator = denominator.replace(0, np.nan)
         group['mofc'] = np.where(
             denominator > 0,
-            np.ceil(group['bs'] / 16) / denominator,
+            np.ceil(group['running_seq_lens'] / 16) / denominator,
             1.0
         )
         group['mofc'] = group['mofc'].fillna(1.0)
         return round(group['mofc'].mean(), 6)
+    
+    def get_step_time(self, group, inference_type):
+        group = group.copy()
+        # 将profiling_data列(inference_type,num_seqs,running_seq_lens,last_inference_latency)中的内容转化为4列
+        group[['profiling_inference_type', 'profiling_num_seqs', 'running_seq_lens', 'last_inference_latency']] = (
+            group['profiling_data']
+            .apply(lambda x: literal_eval(x) if pd.notnull(x) else ("", None, None, None))
+            .apply(pd.Series)
+        )
+        # 剔除last_inference_latency为NaN或0的行
+        group = group[group['last_inference_latency'].notna() & (group['last_inference_latency'] > 0)]
+        mofc = self.get_mofc(group)
+        # 过滤出指定inference_type的数据
+        group = group[group['profiling_inference_type'] == inference_type]
+        # 根据last_inference_latency去重
+        group = group.drop_duplicates(subset=['last_inference_latency'])
+        return {
+            "mofc":mofc, 
+            f"{inference_type}_step_time": round(mean(group['last_inference_latency']), 6) if not group.empty else 0.0
+        }
 
     def get_instance_metrics(self):
         if not os.path.isfile(self.instance_file):
@@ -71,9 +91,11 @@ class InstanceMetricsAnalysis:
                     'num_running_requests': round(mean(group['num_running_requests']),6),
                     'num_waiting_requests': round(mean(group['num_waiting_requests']),6),
                     'num_killed_requests': round(mean(group['num_killed_requests']),6),
-                    'sm_active' : self.get_sm_active(group),
-                    'mofc': self.get_mofc(group),
+                    'sm_active' : self.get_gpu_msg(group),
+                    # 'mofc': self.get_mofc(group),
+                    # f'{inference_type}_step_time': self.get_step_time(group, inference_type),
                 }
+                res = {**res, **self.get_step_time(group, inference_type)}
             else:
                 decode_data = group[group['inference_type'] == 'decode']
                 res = {
@@ -83,10 +105,13 @@ class InstanceMetricsAnalysis:
                     'num_running_requests': round(mean(group['num_running_requests']),6),
                     'num_waiting_requests': round(mean(group['num_waiting_requests']),6),
                     'num_killed_requests': round(mean(group['num_killed_requests']),6),
-                    'sm_active' : self.get_sm_active(group),
-                    'mofc': self.get_mofc(group),
-                    'prefill_mofc': self.get_mofc(group, filter_prefill=True)
+                    'sm_active' : self.get_gpu_msg(group),
+                    # 'mofc': self.get_mofc(group),
+                    # 'prefill_mofc': self.get_mofc(group, filter_prefill=True),
+                    # f'prefill_step_time': self.get_step_time(group, 'prefill'),
+                    # f'decode_step_time': self.get_step_time(group, 'decode'),
                 }
+                res = {**res, **self.get_step_time(group, 'prefill'), **self.get_step_time(group, 'decode')}
             self.results[instance_id] = res
 
 
@@ -566,6 +591,7 @@ class LogAnalysis_new(LogAnalysis):
         self.labels = json_files.keys()
 
         self.cache_file = f'results/results_cache-{self.path_tmp}-{model}-{self.request_len}-{self.qps}-{self.concurrencies}.json'
+        print(f'[LogAnalysis] cache_file:{self.cache_file}')
         if os.path.exists(self.cache_file):
             print(f'[LogAnalysis] exist cache_file:{self.cache_file}')
             with open(self.cache_file, 'r', encoding='utf-8') as f:
@@ -667,25 +693,26 @@ class LogAnalysis_new(LogAnalysis):
         latencies = data[0]
         req_latencies, prefill_latencies, decode_latencies = latencies['request_latencies'], latencies['prefill_token_latencies'], latencies['decode_token_latencies']
         
-        per_token_latency_breakdown_list = data[0]['per_token_latency_breakdown_list']
-        prefill_waiting_time = [(per_token_latency_breakdown_list[i][0]['engine_step_timestamp_begin'] - per_token_latency_breakdown_list[i][0]['engine_add_request_timestamp'])*1000
-                                for i in range(len(per_token_latency_breakdown_list))]
-        engine_step_latency_prefill = [per_token_latency_breakdown_list[i][0]['engine_step_latency'] for i in range(len(per_token_latency_breakdown_list))]
-        engine_step_latency_decode = [
-            mean([token['engine_step_latency'] for token in per_token_latency_breakdown_list[i][1:]])
-            if len(per_token_latency_breakdown_list[i][1:]) > 0 else None
-            for i in range(len(per_token_latency_breakdown_list))
-        ]
+        # per_token_latency_breakdown_list = data[0]['per_token_latency_breakdown_list']
+        # prefill_waiting_time = [(per_token_latency_breakdown_list[i][0]['engine_step_timestamp_begin'] - per_token_latency_breakdown_list[i][0]['engine_add_request_timestamp'])*1000
+        #                         for i in range(len(per_token_latency_breakdown_list))]
+        # engine_step_latency_prefill = [per_token_latency_breakdown_list[i][0]['engine_step_latency'] for i in range(len(per_token_latency_breakdown_list))]
+        # engine_step_latency_decode = [
+        #     mean([token['engine_step_latency'] for token in per_token_latency_breakdown_list[i][1:]])
+        #     if len(per_token_latency_breakdown_list[i][1:]) > 0 else None
+        #     for i in range(len(per_token_latency_breakdown_list))
+        # ]
 
         return {
             'request_time':round(mean(req_latencies), 4), 
             'prefill_time': round(mean(prefill_latencies), 4),
             'decode_time': round(mean(decode_latencies), 4),
-            'prefill_waiting_time': round(mean(prefill_waiting_time), 4), 
-            'prefill_step_time': round(mean(engine_step_latency_prefill), 4), 
-            'decode_step_time': round(mean([x for x in engine_step_latency_decode if x is not None]), 4),
+            # 'prefill_waiting_time': round(mean(prefill_waiting_time), 4), 
+            # 'prefill_step_time': round(mean(engine_step_latency_prefill), 4), 
+            # 'decode_step_time': round(mean([x for x in engine_step_latency_decode if x is not None]), 4),
         }
     
+    # Deprecated
     def get_step_lantency(self, json_file):
         '''
             return prefill_waiting_time, prefill_step_time, decode_step_time
@@ -895,22 +922,29 @@ class LogAnalysis_new(LogAnalysis):
             print()
         return res
  
-    def get_all_msg(self):
+    def get_all_msg(self, cover=False):
         for concurrency in self.concurrencies:
             concurrency = str(concurrency)
             if concurrency not in self.results:
                 self.results[concurrency] = {}
             for q in self.qps:
                 q = str(q)
-                if concurrency in self.results and q in self.results[concurrency]:
+                if not cover and concurrency in self.results and q in self.results[concurrency]:
+                    for label, results in self.results[concurrency][q].items():
+                        if 'prefill_step_time' in results:
+                            del results['prefill_step_time']
+                        if 'decode_step_time' in results:
+                            del results['decode_step_time']
                     continue
                 results_qps = self.get_all_msg_qps(concurrency, q)
                 self.results[concurrency][q] = results_qps
                 self.save_to_cache_file()
+        self.save_to_cache_file()
 
     def get_all_msg_qps_updata_instance_metric(self, concurrency, qps, data):
         print(f"[get_all_msg_qps_updata_instance_metric] concurrency:{concurrency}, qps:{qps}")
-        instance_files = self.get_instance_file_path(concurrency, qps, 1, 4, ['1,1-2'])
+        instance_files = self.get_instance_file_path(concurrency, qps, 
+                                            self.instance_deploy_msg, self.request_len,)
         labels = instance_files.keys()
         res = {}
         for label in labels:
@@ -978,13 +1012,16 @@ class LogAnalysis_new(LogAnalysis):
             # return self.get_instance_split_metric_base(data, new_metric)
             return None
 
-    def translate_to_excel_according_metrics(self, metrics):
+    def translate_to_excel_according_metrics(self, metrics, suffix=None):
         data = {}
         for concurrency in self.concurrencies:
             for q in self.qps:
                 # 构造以 concurrency 为行，latency 为列的 DataFrame
-                data[(q, concurrency)] = analysis.results[str(concurrency)][str(q)]
-        output_path = self.cache_file.replace('.json', '.xlsx')
+                data[(q, concurrency)] = self.results[str(concurrency)][str(q)]
+        if suffix is not None:
+            output_path = self.cache_file.replace('.json', f'_{suffix}.xlsx')
+        else:
+            output_path = self.cache_file.replace('.json', '.xlsx')
         print(f'[translate_to_excel_according_metrics] output_path:{output_path}')
         with pd.ExcelWriter(output_path) as writer:
             for metric in metrics:
@@ -1011,7 +1048,7 @@ class LogAnalysis_new(LogAnalysis):
                     df_qps.to_excel(writer, sheet_name=sheet_name)
 
 if __name__ == '__main__':
-    # instance_metric = InstanceMetricsAnalysis('/workspace/llm-serve/Llumnix/benchmark_test/logs/A6000-2-formal2-concurrency-4-pdd-4/llama-13b/poisson/serve_4_tp1_2000_qps_1_instance.csv', False)
+    # instance_metric = InstanceMetricsAnalysis('/workspace/llm-serve/Llumnix/benchmark_test/logs/A6000-2-formal2-concurrency-4-pdd-4/llama-13b/poisson/serve_pdd_tp1_2000_qps_1_1_3_instance.csv')
     # instance_metric.get_instance_metrics()
     # print(instance_metric.results)
     # print(analysis.get_all_msg_qps(1,1))
@@ -1019,8 +1056,8 @@ if __name__ == '__main__':
     # analysis = LogAnalysis('llama-7b')
     # analysis.get_all_msg()
 
-    analysis = LogAnalysis('llama-7b')
-    analysis.get_all_msg()
+    # analysis = LogAnalysis('llama-7b')
+    # analysis.get_all_msg()
 
     # analysis = LogAnalysis('llama-7b')
     # analysis.get_all_msg_updata_instance_metric()
@@ -1039,25 +1076,31 @@ if __name__ == '__main__':
     # instance_deploy_msg = [     # (prefill_tps, decode_tps)
     #     ([1,1,1,1],[]),([1,1],[2]),
     # ]
-    # # analysis = LogAnalysis_new('llama-13b', [2], [1,2], instance_deploy_msg, request_len='256-256', )
-    # analysis = LogAnalysis_new('llama-7b', [4], [1,2], instance_deploy_msg, request_len='512-256', )
-    # analysis.get_all_msg()
-    # metrics = [
-    #         ["request_time", "prefill_time", "decode_time", "prefill-mofc",'prefill-gpu_cache_usage'],
-    #         'prefill_bs',
-    #         'prefill_all_time_bs',
-    # ]
-    # analysis.translate_to_excel_according_metrics(metrics)
+    # for req_len in ['512-256', '256-256', '128-256']:
+    #     print(f'[main] prompt_len:{req_len}')
+    #     analysis = LogAnalysis_new('llama-13b', [2], [1,2,4,8], instance_deploy_msg, request_len=req_len, )
+    #     # analysis = LogAnalysis_new('llama-7b', [4], [1,2,4,8], instance_deploy_msg, request_len=req_len, )
+    #     try:
+    #         analysis.get_all_msg()
+    #         metrics = [
+    #                 ["request_time", "prefill_time", "decode_time", "prefill-mofc",'prefill-gpu_cache_usage'],
+    #                 'prefill_bs',
+    #                 'prefill_all_time_bs',
+    #         ]
+    #         analysis.translate_to_excel_according_metrics(metrics)
+    #     except Exception as e:
+    #         print(f'[main] error:{str(e)}')
+            
 
-    # instance_deploy_msg = [     # (prefill_tps, decode_tps)
-    #     ([1,1,1],[]),([1],[2]),
-    # ]
-    # analysis = LogAnalysis_new('llama-13b', [1], [1,2,4], instance_deploy_msg, request_len=None, )
-    # analysis.get_all_msg()
-    # metrics = [
-    #         ["request_time", "prefill_time", "decode_time", "prefill-mofc",'prefill-gpu_cache_usage'],
-    #         'prefill_bs',
-    #         'prefill_all_time_bs',
-    # ]
-    # analysis.translate_to_excel_according_metrics(metrics)
-
+    # 3卡
+    instance_deploy_msg = [     # (prefill_tps, decode_tps)
+        ([1,1,1],[]),([1],[2]),
+    ]
+    analysis = LogAnalysis_new('llama-13b', [1,2], [1,2,4], instance_deploy_msg, request_len=None, )
+    analysis.get_all_msg()
+    metrics = [
+            ["request_time", "prefill_time", "decode_time", "prefill-mofc",'prefill-gpu_cache_usage'],
+            'prefill_bs',
+            'prefill_all_time_bs',
+    ]
+    analysis.translate_to_excel_according_metrics(metrics)

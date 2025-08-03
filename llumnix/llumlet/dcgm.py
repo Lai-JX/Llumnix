@@ -315,6 +315,44 @@ class PowerMonitor:
     def get_output(self) -> List[dict]:
         """获取功耗监控数据"""
         return list(self._output_lines)
+    
+class DVFSController:
+
+    def __init__(self, device_ids):
+        self.device_ids = device_ids
+        self.handles = []
+
+        # Initialize NVML and get handles for all devices
+        pynvml.nvmlInit()
+        for device_id in self.device_ids:
+            handle = pynvml.nvmlDeviceGetHandleByIndex(device_id)
+            self.handles.append(handle)
+
+    def activate(self):
+        for handle in self.handles:
+            # Set power limit and enable power management
+            pynvml.nvmlDeviceSetPowerManagementLimit(handle, 300 * 1000)
+            pynvml.nvmlDeviceSetPersistenceMode(handle, 1)
+
+    def set_frequency(self, core_freq, mem_freq):
+        for handle in self.handles:
+            # Set core and memory clock limits
+            pynvml.nvmlDeviceSetGpuLockedClocks(handle, core_freq, core_freq)
+            pynvml.nvmlDeviceSetMemoryLockedClocks(handle, mem_freq, mem_freq)
+            print('  Core and Memory clock limits: {}----{}'.format(core_freq, mem_freq))
+
+    def reset(self):
+        for i,handle in enumerate(self.handles):
+            # Reset settings to default
+            pynvml.nvmlDeviceResetGpuLockedClocks(handle)
+            pynvml.nvmlDeviceResetMemoryLockedClocks(handle)
+            pynvml.nvmlDeviceSetPersistenceMode(handle, 0)
+            print(f"[INFO] DVFS Reset | 设备: {i}")
+
+
+    def __del__(self):
+        # Shutdown NVML
+        pynvml.nvmlShutdown()
 
 class GPUMonitor:
     def __init__(self, device_ids: List[int], interval_ms: int = 1000, max_output_lines: int = 10):
@@ -331,6 +369,7 @@ class GPUMonitor:
 
         self.dcgm_monitor = DCGMMonitor(device_ids=device_ids, interval_ms=interval_ms, max_output_lines=max_output_lines)
         self.power_monitor = PowerMonitor(device_ids=device_ids, interval_ms=interval_ms, max_output_lines=max_output_lines)
+        self.dvfs_controller = DVFSController(device_ids=device_ids)
 
     def start(self) -> bool:
         """
@@ -341,6 +380,7 @@ class GPUMonitor:
         try:
             self.dcgm_monitor.start()  # 启动 DCGM 监控
             self.power_monitor.start()  # 启动 PowerMonitor
+            self.dvfs_controller.activate()  # 激活 DVFS 控制器
             return True
         except Exception as e:
             logger.error(f"[ERROR] 启动失败: {str(e)}")
@@ -355,9 +395,31 @@ class GPUMonitor:
         try:
             self.dcgm_monitor.stop()  # 停止 DCGM 监控
             self.power_monitor.stop()  # 停止 PowerMonitor
+            self.dvfs_controller.reset() # 重置 DVFS 控制器
             return True
         except Exception as e:
             logger.error(f"[ERROR] 停止失败: {str(e)}")
+            return False
+    def start_dvfs(self) -> bool:
+        self.dvfs_controller.activate()  # 激活 DVFS 控制器
+    def stop_dvfs(self) -> bool:
+        self.dvfs_controller.reset()
+    def set_frequency(self, sm_freq: int, mem_freq: int) -> bool:
+        """
+        设置 GPU 频率
+        
+        :param sm_freq: SM 频率
+        :param mem_freq: 内存频率
+        :return: 是否成功设置频率
+        """
+        try:
+            # TODO 设置频率
+            # self.gpu_monitor.set_frequency(sm_freq, mem_freq)
+            self.dvfs_controller.set_frequency(sm_freq, mem_freq)
+            print(f"[INFO] 设置 GPU 频率: SM {sm_freq} MHz, MEM {mem_freq} MHz")
+            return True
+        except Exception as e:
+            print(f"[ERROR] 设置频率失败: {str(e)}")
             return False
     def get_gpu_metrics(self) -> dict:
         """
@@ -375,5 +437,14 @@ class GPUMonitor:
         gpu_metrics = self.dcgm_monitor.get_metrics_data()
         gpu_metrics['power'] = power_data
         return gpu_metrics
+    
+    def destroy(self):
+        """
+        销毁 GPU 监控器
+        """
+        self.dcgm_monitor.stop()
+        self.power_monitor.stop()
+        self.dvfs_controller.reset()
+        self.dvfs_controller.__del__()
 
  
