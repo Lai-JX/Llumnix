@@ -1,0 +1,23 @@
+
+llama-7b:
+  block_size: 16
+  num_attention_layers: 32
+  num_heads: 32
+  head_size: 128
+  dtype_size: 2  # float16
+  max_seq_len: 2048   # max_num_batched_tokens = max(max_model_len, 2048)
+  gpu_block: 3806
+  cpu_block: 512
+  weight_size:
+    1: 12.5518
+llama-13b:
+  block_size: 16
+  num_attention_layers: 40
+  num_heads: 40
+  head_size: 128
+  dtype_size: 2  # float16  
+  max_seq_len: 2048
+  gpu_block: 1475
+  cpu_block: 327
+  weight_size:
+    1: 24.2835  # tp:size in GB

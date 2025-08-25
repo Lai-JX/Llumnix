@@ -60,8 +60,11 @@ def launch_ray_cluster(port: int) -> subprocess.CompletedProcess:
     if llumnix_envs.HEAD_NODE:
         ray_start_command = f"ray start --head --node-ip-address={node_ip_address} --port={port}"
         try:
+            env = os.environ.copy()
+            env["RAY_BACKEND_LOG_LEVEL"] = "debug"
+            env["VLLM_LOGGING_LEVEL"] = "DEBUG"
             result = subprocess.run(['ray', 'start', '--head', f'--port={port}'],
-                                    check=True, text=True, capture_output=True, timeout=SUBPROCESS_RUN_TIMEOUT)
+                                    check=True, text=True, capture_output=True, timeout=SUBPROCESS_RUN_TIMEOUT,env=env)
         except Exception as e: # pylint: disable=broad-except
             if isinstance(e, subprocess.CalledProcessError):
                 logger.error("'{}' failed with: \n{}".format(ray_start_command, e.stderr))

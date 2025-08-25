@@ -67,6 +67,9 @@ class MigrationWorker(Worker):
 
     def get_global_rank(self):
         return self.global_rank
+    
+    def get_local_rank(self):
+        return self.local_rank
 
     def reserve_memory_for_migration(self,
                                      migration_config: MigrationConfig,
@@ -166,8 +169,8 @@ class MigrationWorker(Worker):
             total_kv_cache_size = len(src_blocks) * CacheEngine.get_cache_block_size(
                 self.cache_config, self.model_config, self.parallel_config)
             speed = total_kv_cache_size / GiB_bytes / (end_time - start_time)
-            logger.info("Recv kv cache done, num_blocks: {}, total_kv_cache_size: {}, time: {:.2f}s, speed: {:.5f}GB/s."
-                        .format(len(src_blocks), convert_bytes(total_kv_cache_size), end_time - start_time, speed))
+            logger.info("Recv kv cache done[{}], num_blocks: {}, total_kv_cache_size: {}, time: {:.2f}ms, speed: {:.5f}GB/s."
+                        .format(request_id, len(src_blocks), convert_bytes(total_kv_cache_size), (end_time - start_time)*1000, speed))
             return True
         # pylint: disable=broad-except
         except Exception as e:
@@ -180,7 +183,7 @@ class MigrationWorker(Worker):
     def do_send(self, *args, request_id: str = None, send_worker_metadata: bool = False, **kwargs):
         if not send_worker_metadata:
             return self.migration_backend.do_send(request_id, *args, **kwargs)
-        return self.migration_backend.do_send(*args, **kwargs), self._get_seq_group_metadata(request_id)
+        return self.migration_backend.do_send(request_id, *args, **kwargs), self._get_seq_group_metadata(request_id)
 
     def _get_seq_group_metadata(self, request_id: str) -> Union[SequenceGroupMetadata, SequenceGroupMetadataDelta]:
         # Only send sequence group metadata in last stage (blocking migration), so the request id must exist.

@@ -1,6 +1,7 @@
 #!/bin/bash
 export HEAD_NODE_IP='127.0.0.1'
-export RAY_DEDUP_LOGS=0 
+# export RAY_DEDUP_LOGS=0 
+# export VLLM_ATTENTION_BACKEND=FLASHINFER
 # $1: prefill_dps，如"1,1"
 # $2: decode_dps，如"2"     为空时表示不使用 pd 分离
 # $3: 请求数量
@@ -38,7 +39,7 @@ prompt_len=${9:-""}
 response_len=${10:-""}
 
 MODEL_PATH="/share/models/llama-2-7b"
-MIGRATION_BACKEND="nccl"       # rayrpc
+MIGRATION_BACKEND="rayrpc"       # rayrpc gloo nccl
 
 if [ "$MODEL" == "llama-2-7b" ]; then
     MODEL_PATH="/share/models/llama-2-7b"
@@ -58,7 +59,7 @@ echo "模型路径: $MODEL_PATH"
 BASE_DIR='/workspace/llm-serve/Llumnix/benchmark_test/logs/'$log_dir_prefix/$MODEL/$DISTRIBUTION
 mkdir -p $BASE_DIR
 
-nvidia-smi -pl 300
+# nvidia-smi -pl 300
 nvidia-smi -pm ENABLED
 nvidia-smi -acp 0
 
@@ -151,7 +152,7 @@ Llumnix_benchmark() {
             --log_latencies \
             --fail_on_response_failure \
             --max_request_len $max_request_len \
-            --log_filename $BASE_DIR/benchmark_$((count + 1))\_tp$TP\_$REQ_NUM\_qps_$QPS. \
+            --log_filename $BASE_DIR/benchmark_$((count + 1))\_tp$TP\_$REQ_NUM\_qps_$QPS \
             --prompt_save_path /workspace/llm-serve/Llumnix/benchmark_test/logs/prompts/sharegpt_$MODEL\_$DISTRIBUTION\_$REQ_NUM\_qps_$QPS \
             --qps $QPS 2>&1 | tee -a $BASE_DIR/serve_$((count + 1))\_tp$TP\_$REQ_NUM\_qps_$QPS\_benchmark.log
     else
@@ -172,7 +173,7 @@ Llumnix_benchmark() {
             --log_latencies \
             --fail_on_response_failure \
             --max_request_len $max_request_len \
-            --log_filename $BASE_DIR/benchmark_$((count + 1))\_tp$TP\_$REQ_NUM\_qps_$QPS. \
+            --log_filename $BASE_DIR/benchmark_$((count + 1))\_tp$TP\_$REQ_NUM\_qps_$QPS \
             --prompt_save_path /workspace/llm-serve/Llumnix/benchmark_test/logs/prompts/gen_request_$MODEL\_$DISTRIBUTION\_$REQ_NUM\_qps_$QPS\_prompt_len_$prompt_len\_response_len_$response_len \
             --qps $QPS 2>&1 | tee -a $BASE_DIR/serve_$((count + 1))\_tp$TP\_$REQ_NUM\_qps_$QPS\_benchmark.log
     fi
@@ -216,6 +217,8 @@ Llumnix_benchmark_pdd() {
                 --max-migration-concurrency $max_migration_concurrency \
                 --log-filename $BASE_DIR/serve_pdd\_$REQ_NUM\_qps_$QPS\_$PREFILL_TPS_STR\_$DECODE_TPS_STR > $BASE_DIR/serve_pdd\_$REQ_NUM\_qps_$QPS\_$PREFILL_TPS_STR\_$DECODE_TPS_STR.log 2>&1 &
                 # --max-num-seqs $REQ_NUM \
+                # --disable-async-output-proc \
+                # --kv-cache-dtype 'fp8' \
             sleep 15
         else
             port=$((1233 + $count))
@@ -237,6 +240,8 @@ Llumnix_benchmark_pdd() {
                 --max-migration-concurrency $max_migration_concurrency \
                 --log-filename $BASE_DIR/serve_pdd\_$REQ_NUM\_qps_$QPS\_$PREFILL_TPS_STR\_$DECODE_TPS_STR > output1.log 2>&1 &
                 # --max-num-seqs $REQ_NUM \
+                # --disable-async-output-proc \
+                # --kv-cache-dtype 'fp8' \
         fi
     done
 
@@ -266,6 +271,7 @@ Llumnix_benchmark_pdd() {
             --max-migration-concurrency $max_migration_concurrency \
             --log-filename $BASE_DIR/serve_pdd\_$REQ_NUM\_qps_$QPS\_$PREFILL_TPS_STR\_$DECODE_TPS_STR > output2.log 2>&1 &
             # --max-num-seqs $REQ_NUM \
+            # --kv-cache-dtype 'fp8' \
         
     done
     # 判断$HEAD_NODE_IP:1234是否可用 

@@ -17,7 +17,8 @@ import time
 from typing import List, Tuple, Optional, Callable, Any
 
 from llumnix.backends.utils import BarrierActor
-from llumnix.backends.vllm.parallel_migration_backend import MigrationBackendResourcPool
+from llumnix.backends.vllm.nccl_migration_backend import RayNCCLMigrationBackend
+from llumnix.backends.vllm.parallel_migration_backend import MigrationBackendResourcPool, ProxyActor
 import torch
 from func_timeout import func_set_timeout
 import ray
@@ -34,32 +35,10 @@ from llumnix.constants import (
     NUMPY_SUPPORTED_DTYPES_FOR_MIGRATION,
     RAYRPC_MIGRATION_TIMEOUT,
 )
-from llumnix.utils import random_uuid, ray_get_with_timeout
+from llumnix.utils import RequestIDType, random_uuid, ray_get_with_timeout
 import numpy as np
 
 logger = init_logger(__name__)
-
-
-# Once worker died, proxy actor will not restart.
-@ray.remote(num_cpus=0, max_concurrency=8, max_restarts=-1)
-class ProxyActor:
-    def __init__(self, is_driver_worker: bool, use_ray_spmd_worker: bool):
-        self.is_driver_worker = is_driver_worker
-        self.use_ray_spmd_worker = use_ray_spmd_worker
-
-    def exec_method(self, handle: ray.actor.ActorHandle, from_driver_worker=None, *args, **kwargs) -> Any:
-        if (from_driver_worker) is True or (self.is_driver_worker and not self.use_ray_spmd_worker):
-            ret = ray_get_with_timeout(
-                handle.execute_engine_method_async.remote(
-                    "execute_driver_worker_method_async", *args, **kwargs
-                )
-            )
-        else:
-            ret = ray_get_with_timeout(
-                handle.execute_method.options(concurrency_group="migate").remote(*args, **kwargs)
-            )
-
-        return ret
 
 
 NUMPY_SUPPORTED_DTYPES = [torch.float32, torch.float16]
@@ -219,14 +198,14 @@ class RayRpcMigrationBackend(MigrationBackendBase):
             for idx, handle in enumerate(src_handle):
                 from_driver_worker = (idx == 0 and self.worker_rank == 0)
                 tasks.append(
-                    self.actor.exec_method.remote(handle, from_driver_worker, "do_send",
+                    self.proxy_actor.exec_method.remote(handle, from_driver_worker, "do_send",
                     None, send_blocks, request_id=request_id, send_worker_metadata=send_worker_metadata)
                 )
             ray_objs = ray.get(tasks)
 
             
             if rpc_numpy_cache is not None:
-                self.do_recv(rpc_numpy_cache, recv_blocks)
+                self.do_recv(request_id, rpc_numpy_cache, recv_blocks)
             recv_blocks = dst_blocks[start_idx:start_idx+offset]
 
             if send_worker_metadata:
@@ -247,7 +226,7 @@ class RayRpcMigrationBackend(MigrationBackendBase):
             rpc_numpy_cache = rpc_numpy_cache.reshape( self.num_layers, 2, len(send_blocks), self.migration_cache_size)
             logger.info("migrate_cache_subtract_tp, concatenate and reshape cost: {}"
                         .format(time.time()-ss_time))
-        self.do_recv(rpc_numpy_cache, recv_blocks)
+        self.do_recv(request_id, rpc_numpy_cache, recv_blocks)
         if src_seq_group_metadata:
             self.worker_stage_seq_group_metadata_callback(request_id, src_seq_group_metadata)
 
@@ -374,6 +353,7 @@ class RayColMigrationBackend(MigrationBackendBase):
                  use_ray_spmd_worker: bool,
                  worker_stage_seq_group_metadata_callback: Callable,
                  ) -> None:
+        assert migration_config.max_migration_concurrency == 1, "Not Support Migration Concurrency For Gloo!"
         super().__init__()
 
         # pylint: disable=C0415
@@ -514,6 +494,7 @@ class RayColMigrationBackend(MigrationBackendBase):
             send_worker_metadata = self.use_ray_spmd_worker and is_last_stage and is_last_comm
             ray_obj = self.proxy_actor.exec_method.remote(
                 src_worker_handle,
+                from_driver_worker,
                 "do_send",
                 self.global_rank,
                 send_blocks,
@@ -524,17 +505,17 @@ class RayColMigrationBackend(MigrationBackendBase):
             # Ray collective communication does not have timeout parameters,
             # and run this method in another thread to set timeout will also cause cuda stream device mismatch error,
             # so recv cache does not have timeout only when the migration backend is ray collective.
-            self.do_recv(src_rank, recv_blocks)
+            self.do_recv(request_id, src_rank, recv_blocks)
             if send_worker_metadata:
                 _, src_seq_group_metadata = ray_get_with_timeout(ray_obj)
         if src_seq_group_metadata:
             self.worker_stage_seq_group_metadata_callback(request_id, src_seq_group_metadata)
 
     def migrate_cache_subtract_tp(self,
+                      request_id: RequestIDType,
                       src_handle: List["ray.actor.ActorHandle"],
                       src_blocks: List[int],
                       dst_blocks: List[int],
-                      request_id: str,
                       is_last_stage: bool,
                       chunk_size: int=1) -> None:
         tot_blocks = len(src_blocks)
@@ -544,7 +525,7 @@ class RayColMigrationBackend(MigrationBackendBase):
         for idx, handle in enumerate(src_handle):
             from_driver_worker = (idx == 0 and self.worker_rank == 0)
             tasks.append(
-                self.actor.exec_method.remote(handle, from_driver_worker, "get_global_rank")
+                self.proxy_actor.exec_method.remote(handle, from_driver_worker, "get_global_rank")
             )
         src_ranks = ray.get(tasks)
         logger.info(f"time[do_send] after src_ranks : {time.time()-ss}")
@@ -559,12 +540,12 @@ class RayColMigrationBackend(MigrationBackendBase):
             for idx, handle in enumerate(src_handle):
                 from_driver_worker = (idx == 0 and self.worker_rank == 0)
                 tasks.append(
-                    self.actor.exec_method.remote(handle, from_driver_worker, "do_send",
+                    self.proxy_actor.exec_method.remote(handle, from_driver_worker, "do_send",
                     self.global_rank, send_blocks, request_id=request_id, send_worker_metadata=send_worker_metadata)
                 )
             
             logger.info(f"time[do_send] before do_recv : {time.time()-ss}")
-            self.do_recv(src_ranks, recv_blocks, 0, chunk_size)
+            self.do_recv(request_id, src_ranks, recv_blocks, 0, chunk_size)
             logger.info(f"time[do_send] after do_recv : {time.time()-ss}")
             if send_worker_metadata:
                 ray_objs = ray.get(tasks)
@@ -572,7 +553,7 @@ class RayColMigrationBackend(MigrationBackendBase):
         if src_seq_group_metadata:
             self.worker_stage_seq_group_metadata_callback(request_id, src_seq_group_metadata)
 
-    def do_send(self, dst_worker_handle: "ray.actor.ActorHandle", blocks: List[int], virtuel_engine: int=0, chunk_size=1, chunk_rank=0):
+    def do_send(self, request_id, dst_worker_handle: "ray.actor.ActorHandle", blocks: List[int], virtuel_engine: int=0, chunk_size=1, chunk_rank=0):
         import cupy
         num_blocks = len(blocks)
         # logger.info("do_send: {} -> {}, chunk_rank: {}, worker_rank:{}, local_rank:{}, num_blocks: {}"
@@ -642,7 +623,7 @@ class RayColMigrationBackend(MigrationBackendBase):
         # logger.info("do_send finished: {} -> {}, chunk_rank: {}"
         #             .format(self.global_rank, dst_handle, chunk_rank,))
 
-    def do_recv(self, src_worker_handle: ray.actor.ActorHandle, blocks: List[int], virtuel_engine: int=0, chunk_size=1) -> None:
+    def do_recv(self, request_id, src_worker_handle: ray.actor.ActorHandle, blocks: List[int], virtuel_engine: int=0, chunk_size=1) -> None:
         def recv_worker(idx, group_rank):
             col.recv(self.send_cache_split[idx], group_rank, self.group_name)
             self.send_cache_split[idx] = self.send_cache_split[idx].reshape(
@@ -723,8 +704,20 @@ def get_migration_backend(instance_id: str,
     target_migration_backend = None
     backend = migration_config.migration_backend
 
-    if backend in ['nccl', 'gloo']:
+    if backend in ['gloo']:
         target_migration_backend = RayColMigrationBackend(instance_id,
+                                                          migration_config,
+                                                          cache_engine,
+                                                          local_rank,
+                                                          worker_rank,
+                                                          scheduling_strategy,
+                                                          is_driver_worker,
+                                                          gpu_cache,
+                                                          use_ray_spmd_worker,
+                                                          worker_stage_seq_group_metadata_callback,
+                                                          )
+    elif backend == 'nccl':
+        target_migration_backend = RayNCCLMigrationBackend(instance_id,
                                                           migration_config,
                                                           cache_engine,
                                                           local_rank,

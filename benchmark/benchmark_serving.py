@@ -270,7 +270,8 @@ def calculate_cdf(latencies):
     print(f"{cumsum=}")
 
 def plot_latency_cdf(req_latencies, prefill_latencies, decode_latencies, log_filename):
-    fig_filename = os.path.splitext(log_filename)[0] + "_latency.png"
+    # fig_filename = os.path.splitext(log_filename)[0] + "_latency.png"
+    fig_filename = log_filename + "_latency.png"
     fig, (ax_req, ax_prefill, ax_decode) = plt.subplots(1, 3, figsize=(3*7, 4.8))
 
     def plot_single(ax, latencies, is_prefill=False):
@@ -316,7 +317,8 @@ def plot_latency_cdf(req_latencies, prefill_latencies, decode_latencies, log_fil
     fig.savefig(fig_filename)
 
 def plot_len_cdf(prompt_lens, response_lens, total_tokens, log_filename):
-    fig_filename = os.path.splitext(log_filename)[0] + "_len.png"
+    # fig_filename = os.path.splitext(log_filename)[0] + "_len.png"
+    fig_filename = log_filename + "_len.png"
     fig, (ax_prompt, ax_response, ax_total) = plt.subplots(1, 3, figsize=(3*7, 4.8))
 
     def plot_single(ax, lens, x_label_str, title_str):
@@ -373,7 +375,8 @@ def plot_instance(log_filename_0):
     fig, ax = plt.subplots()
     ax.plot(timestamp_list_0, num_instances_list_0, color="red", label=f"instance_num(avg {avg_instance_num} /s)")
     ax.legend(loc='upper left')
-    fig_filename = os.path.splitext(log_filename_0)[0] + "_instance.png"
+    # fig_filename = os.path.splitext(log_filename_0)[0] + "_instance.png"
+    fig_filename = log_filename_0 + "_instance.png"
     index1 = fig_filename.rfind('/')
     index2 = fig_filename.rfind('/', 0, index1)
     fig_filename_title = fig_filename[index2 + 1:]
@@ -391,7 +394,8 @@ def save_all_decode_token_latencies_npy(all_token_latencies: List[np.ndarray], l
             all_lat_pairs.append((pair[0],pair[1]))
     all_lat_pairs = np.array(all_lat_pairs,dtype=dtype)
     all_lat_pairs = np.sort(all_lat_pairs,order='timestamp')
-    np.save(os.path.splitext(log_filename)[0], all_lat_pairs)
+    # np.save(os.path.splitext(log_filename)[0], all_lat_pairs)
+    np.save(log_filename, all_lat_pairs)
 
 def print_latency(output):
     # output = {
@@ -923,11 +927,11 @@ def main():
         args.fail_on_response_failure,
     ))
 
-    file_name = os.path.splitext(args.log_filename)[0] + "_latency_info.json"
+    # file_name = os.path.splitext(args.log_filename)[0] + "_latency_info.json"
+    file_name = args.log_filename + "_latency_info.json"
     results = []
     import datetime
     current_time = datetime.datetime.now().strftime("%Y-%m-%d_%H:%M:%S")
-    file_name = os.path.splitext(args.log_filename)[0] + "_latency_info.json"
     try:
         # with open(file_name, 'r') as f:
         #     results = json.load(f)

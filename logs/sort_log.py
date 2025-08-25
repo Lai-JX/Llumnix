@@ -28,7 +28,7 @@ def log_sort_key(line):
         return ts
 
 def main():
-    input_file = "/workspace/llm-serve/Llumnix/benchmark_test/logs/A6000-2-multi-port-zmp-parallel-main-pdd-4/llama-7b/poisson/serve_pdd_tp1_2000_qps_6_2_2.log"
+    input_file = "/workspace/llm-serve/Llumnix/benchmark_test/logs/A6000-test-concurrency-4-128-256/llama-13b/poisson/serve_pdd_100_qps_16_1_2.log"
     output_file = input_file.replace(".log", "_sorted.log")
 
     with open(input_file, "r", encoding="utf-8") as f:

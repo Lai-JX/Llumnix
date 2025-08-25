@@ -7,7 +7,7 @@ max_migration_concurrencys=(4 2 1 8)
 prefix="$gputype"
 prompt_len=2016
 response_len=32
-
+# 示例：./run_base.sh "1" "1" 100 llama-13b poisson 16 A6000-test-concurrency-4-128-256 4 128 256
 # prefix="$gputype-pdd-hetero"
 # prompt_len=2016
 # response_len=32

@@ -296,3 +296,5 @@ class Llumlet:
     async def execute_migration_method_async(self, method, *args, **kwargs):
         executor = getattr(self.migration_coordinator, method)
         return await executor(*args, **kwargs)
+    def get_class_name(self):
+        return self.__class__.__name__

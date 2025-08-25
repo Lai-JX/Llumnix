@@ -390,6 +390,7 @@ class BackendVLLM(BackendInterface):
         self.engine.output_processor.scheduler = self.engine.scheduler
         self.instance_id = instance_id
         self.worker_handle_list = self.engine.model_executor.workers.copy()
+        logger.info(f"instance_id:{self.instance_id}, len(worker_handle_list): {len(self.worker_handle_list)}")
         if len(self.worker_handle_list) + 1 == self.engine.parallel_config.world_size:
             self.worker_handle_list.insert(0, ray.get_actor(get_instance_name(self.instance_id), namespace="llumnix"))
 

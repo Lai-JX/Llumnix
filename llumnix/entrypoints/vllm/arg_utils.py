@@ -106,8 +106,8 @@ def check_instance_args(instance_args: InstanceArgs, engine_args: AsyncEngineArg
     assert instance_args.migration_backend in ['rayrpc', 'gloo', 'nccl'], \
         "Only support rayrpc, gloo and nccl migration backend for vLLM."
 
-    assert not (parallel_config.world_size > 1 and migration_config.migration_backend == 'nccl'), \
-        "Llumnix does not support TP or PP when the migration backend is nccl, please change migration backend."
+    # assert not (parallel_config.world_size > 1 and migration_config.migration_backend == 'nccl'), \
+    #     "Llumnix does not support TP or PP when the migration backend is nccl, please change migration backend."
 
     assert not (not engine_args.disable_async_output_proc and instance_args.simulator_mode), \
         "Llumnix does not support async output processing when enabling simualtor mode, please disable async output processing."
