@@ -9,11 +9,14 @@ import numpy as np
 from ast import literal_eval
 from sklearn.linear_model import LinearRegression
 from sklearn.preprocessing import PolynomialFeatures
-from mpl_toolkits.mplot3d import Axes3D
+# from mpl_toolkits.mplot3d import Axes3D
 import matplotlib.pyplot as plt
 
 class InstanceProfile:
-    def __init__(self, instance_file_dir, limit_str='tp1', enable_pd=True, is_verbose=False):
+    def __init__(self, instance_file_dir, tp=1, decode_fit_type=0, enable_pd=True, is_verbose=False):
+        '''
+        decode_fit_type: 0-只考虑bs, 1-只考虑avg_seq_len, 2-只考虑all_seq_len
+        '''
         self.instance_file_dir = instance_file_dir
         self.enable_pd = enable_pd
         self.is_verbose = is_verbose
@@ -30,9 +33,17 @@ class InstanceProfile:
 
         self.fit_results = {}
 
-        self.limit_str = limit_str
+        self.limit_str = f'TP{tp}'
+        self.tp = tp
 
-        self.cache_file = os.path.join(self.instance_file_dir, f'{limit_str}_instance_profile_results.json')
+        self.decode_fit_type = decode_fit_type
+        if decode_fit_type == 0:
+            self.cache_file = os.path.join(self.instance_file_dir, f'{self.limit_str}_instance_profile_results.json')
+        elif decode_fit_type == 1:
+            self.cache_file = os.path.join(self.instance_file_dir, f'{self.limit_str}_instance_profile_decode_avg_seq_len_results.json')
+        elif decode_fit_type == 2:
+            self.cache_file = os.path.join(self.instance_file_dir, f'{self.limit_str}_instance_profile_decode_all_seq_len_results.json')
+
         if os.path.exists(self.cache_file):
             with open(self.cache_file, 'r') as f:
                 self.results = json.load(f)
@@ -61,7 +72,12 @@ class InstanceProfile:
         group = group[group['profiling_inference_type'] == inference_type]
         # 根据last_inference_latency去重
         group = group.drop_duplicates(subset=['last_inference_latency'])
-        token_num = group['running_seq_lens'] if inference_type == 'prefill' else group['profiling_num_seqs']
+        if self.decode_fit_type == 0:
+            token_num = group['running_seq_lens'] if inference_type == 'prefill' else group['profiling_num_seqs']
+        elif self.decode_fit_type == 1:
+            token_num = group['running_seq_lens'] if inference_type == 'prefill' else group['running_seq_lens'] / group['profiling_num_seqs']
+        elif self.decode_fit_type == 2:
+            token_num = group['running_seq_lens'] if inference_type == 'prefill' else group['running_seq_lens']
         return token_num.to_list(), group['last_inference_latency'].to_list()
 
     def profile(self, instance_file):
@@ -97,6 +113,7 @@ class InstanceProfile:
             for token_num, step_times in self.results[inference_type].items():
                 avg_step_time = mean(step_times)
                 self.avg_results[inference_type][token_num] = avg_step_time
+            print(f'Calculated avg_step_time for {inference_type}, total {len(self.avg_results[inference_type])} entries.')
 
     def print_results(self, num=100):
         # 打印结果
@@ -120,12 +137,21 @@ class InstanceProfile:
         if len(self.results['decode']) == 0:
             # 遍历 self.instance_file_dir 下所有包含pdd的csv文件
             if self.enable_pd:
-                instance_files = [f for f in os.listdir(self.instance_file_dir) if self.limit_str in f and 'benchmark' not in f and f.endswith('.csv') and 'pdd' in f ]
+                instance_files = []
+                for f in os.listdir(self.instance_file_dir):
+                    if f.endswith('.csv') and 'pdd' in f:
+                        tp_list = f.split('_')[4]
+                        if f'{self.tp}-{self.tp}' in tp_list and 'decode' not in f:
+                            instance_files.append(f)
             else:
-                instance_files = [f for f in os.listdir(self.instance_file_dir) if self.limit_str in f and 'benchmark' not in f and f.endswith('.csv')]
-            if not instance_files:
-                print(f"No instance files found in {self.instance_file_dir} containing 'pdd'.")
-                return None 
+                instance_files = []
+                for f in os.listdir(self.instance_file_dir):
+                    if f.endswith('.csv'):
+                        tp_list = f.split('_')[4]
+                        if f'{self.tp}-{self.tp}' in tp_list:
+                            instance_files.append(f)
+
+            print(f"Found {len(instance_files)} instance files: {instance_files}")
             for instance_file in instance_files:
                 instance_file_path = os.path.join(self.instance_file_dir, instance_file)
                 self.profile(instance_file_path)
@@ -151,7 +177,7 @@ class InstanceProfile:
             if inference_type == 'prefill':
                 coefficients = np.polyfit(token_nums, avg_step_times, 2)
             elif inference_type == 'decode':
-                coefficients = np.polyfit(token_nums, avg_step_times, 2)
+                coefficients = np.polyfit(token_nums, avg_step_times, 1)
             self.fit_results[inference_type] = coefficients
             if self.is_verbose:
                 print(f"{inference_type} fit_results:{coefficients}")
@@ -181,10 +207,12 @@ class InstanceProfile:
                 iqr = q3 - q1
                 lower_bound = q1 - 1.5 * iqr
                 upper_bound = q3 + 1.5 * iqr
+                num_pre = len(avg_step_times)
                 print(f"Lower bound: {lower_bound}, Upper bound: {upper_bound}")
                 mask = (avg_step_times >= lower_bound) & (avg_step_times <= upper_bound)
                 token_nums = token_nums[mask]
                 avg_step_times = avg_step_times[mask]
+                print(f"Filtered {num_pre - len(avg_step_times)} outliers for {inference_type}.")
             # for t1,t2 in zip(token_nums, avg_step_times):
             #     print(t1,t2)
             axs[i].scatter(token_nums, avg_step_times, label=f'{inference_type} data', color='red', s=10)
@@ -195,7 +223,10 @@ class InstanceProfile:
                 fit_line = np.polyval(self.fit_results[inference_type], token_nums)
                 axs[i].plot(token_nums, fit_line, label=f'{inference_type} fit', color='orange')
                 # 在图片上显示拟合结果
-                fit_eq = f"y = {self.fit_results[inference_type][0]:.6f}x^2 + {self.fit_results[inference_type][1]:.6f}x + {self.fit_results[inference_type][2]:.6f}"
+                if len(self.fit_results[inference_type]) == 2:
+                    fit_eq = f"y = {self.fit_results[inference_type][0]:.6f}x + {self.fit_results[inference_type][1]:.6f}"
+                elif len(self.fit_results[inference_type]) == 3:
+                    fit_eq = f"y = {self.fit_results[inference_type][0]:.6f}x^2 + {self.fit_results[inference_type][1]:.6f}x + {self.fit_results[inference_type][2]:.6f}"
                 axs[i].text(0.05, 0.95, fit_eq, transform=axs[i].transAxes, fontsize=12,
                  verticalalignment='top', bbox=dict(facecolor='white', edgecolor='orange', alpha=0.5))
                 # 在图片上显示RMSE
@@ -217,7 +248,7 @@ class InstanceProfile:
     
 # Decode考虑batchsize和req_len两个因素的影响
 class InstanceDecodeProfiler:
-    def __init__(self, instance_file_dir, limit_str='tp1', enable_pd=True, is_verbose=False):
+    def __init__(self, instance_file_dir, tp=1, enable_pd=True, is_verbose=False):
         self.instance_file_dir = instance_file_dir
         self.enable_pd = enable_pd
 
@@ -230,11 +261,12 @@ class InstanceDecodeProfiler:
 
         self.fit_results = {}
 
-        self.limit_str = limit_str
+        self.limit_str = f'TP{tp}'
+        self.tp = tp
 
         self.is_verbose = is_verbose
 
-        self.cache_file = os.path.join(self.instance_file_dir, f'{limit_str}_instance_decode_profile_results.json')
+        self.cache_file = os.path.join(self.instance_file_dir, f'{self.limit_str}_instance_decode_profile_results.json')
         if os.path.exists(self.cache_file):
             with open(self.cache_file, 'r') as f:
                 self.results = json.load(f)
@@ -302,15 +334,15 @@ class InstanceDecodeProfiler:
         seq_lens_sum = group['running_seq_lens']
         # 计算每个batch的最大seq_len
         # max_seq_lens = seq_lens.apply(lambda x: max(x) if x else 0)           # max_seq_lens
-        max_seq_lens = seq_lens.apply(lambda x: sum(x) / len(x) if x else 0)    # avg_seq_len
+        max_seq_lens = seq_lens_sum / batch_size   # avg_seq_len
 
         # 将token_nums和seq_lens合并为一个二维特征矩阵
         x_val =np.column_stack((batch_size, max_seq_lens, seq_lens_sum, seq_lens.apply(lambda x: sum(x) if x else 0)))
         y = group['last_inference_latency'].to_list()
-        # 过滤掉seq_lens_sum和seq_lens差距过大的部分
-        mask = x_val[:, 2] - x_val[:, 3] <= x_val[:, 0]
-        x_val = x_val[mask] 
-        y = np.array(y)[mask]
+        # # 过滤掉seq_lens_sum和seq_lens差距过大的部分
+        # mask = x_val[:, 2] - x_val[:, 3] <= x_val[:, 0]
+        # x_val = x_val[mask] 
+        # y = np.array(y)[mask]
 
         self.filter_count += len(group) - len(y)
         
@@ -330,8 +362,9 @@ class InstanceDecodeProfiler:
         self.instance_log_group = instance_log.groupby("instance_id")
         for i, (instance_id, group) in enumerate(self.instance_log_group):
             if self.enable_pd:
-                # print(f'Processing instance_id: {instance_id}, group size: {len(group)}')
                 inference_type = self.get_inference_type(group)
+                if self.is_verbose:
+                    print(f'Processing instance_id: {instance_id}, group size: {len(group)}, inference_type: {inference_type}')
                 if inference_type != 'decode':
                     continue
                 x_val, step_time = self.get_step_time(group, inference_type)
@@ -358,8 +391,9 @@ class InstanceDecodeProfiler:
         self.x_values = np.array(self.x_values, dtype=float)
 
         self.req_len_sum = self.x_values[:, 2]  # seq_lens_sum
-        self.x_values = self.x_values[:, :2]  # 只取batch_size和max_seq_len
-        # self.x_values = self.x_values[:, [0,2]]  # 只取batch_size和seq_lens_sum
+        self.bs = self.x_values[:, 0]  # batch_size
+        # self.x_values = self.x_values[:, :2]  # 只取batch_size和avg_seq_len
+        self.x_values = self.x_values[:, [0,2]]  # 只取batch_size和seq_lens_sum
         self.y_values = np.array(self.y_values, dtype=float)
 
 
@@ -389,12 +423,21 @@ class InstanceDecodeProfiler:
         if len(self.results) == 0:
             # 遍历 self.instance_file_dir 下所有包含pdd的csv文件
             if self.enable_pd:
-                instance_files = [f for f in os.listdir(self.instance_file_dir) if self.limit_str in f and 'benchmark' not in f and f.endswith('.csv') and 'pdd' in f ]
+                instance_files = []
+                for f in os.listdir(self.instance_file_dir):
+                    if f.endswith('.csv') and 'pdd' in f:
+                        tp_list = f.split('_')[4]
+                        if f'{self.tp}-{self.tp}' in tp_list and 'decode' not in f:
+                            instance_files.append(f)
             else:
-                instance_files = [f for f in os.listdir(self.instance_file_dir) if self.limit_str in f and 'benchmark' not in f and f.endswith('.csv')]
-            if not instance_files:
-                print(f"No instance files found in {self.instance_file_dir} containing 'pdd'.")
-                return None 
+                instance_files = []
+                for f in os.listdir(self.instance_file_dir):
+                    if f.endswith('.csv'):
+                        tp_list = f.split('_')[4]
+                        if f'{self.tp}-{self.tp}' in tp_list:
+                            instance_files.append(f)
+
+            print(f"Found {len(instance_files)} instance files: {instance_files}")
             for instance_file in instance_files:
                 instance_file_path = os.path.join(self.instance_file_dir, instance_file)
                 self.profile(instance_file_path)
@@ -424,10 +467,13 @@ class InstanceDecodeProfiler:
             mask = (self.y_values >= lower_bound) & (self.y_values <= upper_bound)
             self.x_values = self.x_values[mask]
             self.req_len_sum = self.req_len_sum[mask]
+            self.bs = self.bs[mask]
             self.y_values = self.y_values[mask]
+        x_values = self.x_values
+        y_values = self.y_values
         # 多元线性拟合
         model = LinearRegression()
-        model.fit(self.x_values, self.y_values)
+        model.fit(x_values, y_values)
         # 拟合结果
         if self.is_verbose:
             print(f"fit_results:{model.intercept_} + {model.coef_}")
@@ -507,8 +553,76 @@ class InstanceDecodeProfiler:
             data = [data]
         return np.polynal(self.fit_results[inference_type], data)
 
+# 考虑bs和seq_lens_sum两个因素的影响
+class InstanceDecodeProfilerV2(InstanceDecodeProfiler):
+    def __init__(self, instance_file_dir, tp=1, enable_pd=True, is_verbose=False):
+        super().__init__(instance_file_dir, tp, enable_pd, is_verbose)
+        self.cache_file = os.path.join(self.instance_file_dir, f'{self.limit_str}_instance_decode_profile_v2_results.json')
+        if os.path.exists(self.cache_file):
+            with open(self.cache_file, 'r') as f:
+                self.results = json.load(f)
+                if self.is_verbose:
+                    print(f'Loaded cached results from {self.cache_file}')
+                # 将keys转换为tuple类型，去掉括号
+                self.results = {literal_eval(k): v for k, v in self.results.items()}
+                # 查看key和value的类型
+                if self.results:
+                    first_key = next(iter(self.results))
+                    if self.is_verbose:
+                        print(f'First key type: {type(first_key)}, value type: {type(self.results[first_key])}')
+        else:
+            self.results = {}
+    def get_step_time(self, group, inference_type):
+        assert inference_type == 'decode', "This method is only for decode inference type"
+        group = group.copy()
+        # 将profiling_data列(inference_type,num_seqs,running_seq_lens,last_inference_latency)中的内容转化为4列
+        group[['profiling_inference_type', 'profiling_num_seqs', 'running_seq_lens', 'last_inference_latency']] = (
+            group['profiling_data']
+            .apply(lambda x: literal_eval(x) if pd.notnull(x) else ("", None, None, None))
+            .apply(pd.Series)
+        )
+        # 剔除last_inference_latency为NaN或0的行
+        group = group[group['last_inference_latency'].notna() & (group['last_inference_latency'] > 0)]
+        # 过滤出指定inference_type的数据
+        group = group[group['profiling_inference_type'] == inference_type]
+        # 根据last_inference_latency去重
+        group = group.drop_duplicates(subset=['last_inference_latency'])
+
+        batch_size = group['running_seq_lens'] if inference_type == 'prefill' else group['profiling_num_seqs']
+        
+        seq_lens_sum = group['running_seq_lens']
+
+        # 将token_nums和seq_lens合并为一个二维特征矩阵
+        x_val =np.column_stack((batch_size, seq_lens_sum,))
+        y = group['last_inference_latency'].to_list()
+        # # 过滤掉seq_lens_sum和seq_lens差距过大的部分
+        # mask = x_val[:, 2] - x_val[:, 3] <= x_val[:, 0]
+        # x_val = x_val[mask] 
+        # y = np.array(y)[mask]
+
+        self.filter_count += len(group) - len(y)
+        
+        assert len(x_val) == len(y), f"Length mismatch: x_val {len(x_val)} and last_inference_latency {len(y)}"
+        return x_val, y
+    def calculate_avg_step_time(self):
+        # 计算[bs, max_seq_len]的平均step_time
+        for x, step_times in self.results.items():
+            avg_step_time = mean(step_times)
+            self.avg_results[x] = avg_step_time
+        self.x_values = list(self.avg_results.keys())
+        self.y_values = list(self.avg_results.values())
+        self.x_values = np.array(self.x_values, dtype=float)
+
+        self.req_len_sum = self.x_values[:, 1]  # seq_lens_sum
+        self.bs = self.x_values[:, 0]  # batch_size
+
+        self.y_values = np.array(self.y_values, dtype=float)
+    def sort_results_according_to_token_num(self):
+        # 对结果按照batch_size和seq_len进行排序
+        sorted_items = sorted(self.results.items(), key=lambda x: (x[0][0], x[0][1]))
+        self.results = {k: v for k, v in sorted_items}
 class MigrationProfile:
-    def __init__(self, log_files, is_verbose=False):
+    def __init__(self, log_files, proportion_to_fit=1.0, is_verbose=False):
         if not isinstance(log_files, list):
             log_files = [log_files]
         self.log_files = log_files
@@ -516,6 +630,7 @@ class MigrationProfile:
         self.avg_results = {} # {blocks:avg_time_ms}
         self.fit_results = None
         self.is_verbose = is_verbose
+        self.proportion_to_fit = proportion_to_fit
 
     def extract_migration_info(self, log_file):
         if self.is_verbose:
@@ -560,7 +675,23 @@ class MigrationProfile:
         self.fit_block_num_vs_avg_migration_time()
 
     def calculate_avg_migrate_time(self):
-        for block, migration_times in self.results.items():
+        # 获取每个block数下的数据量
+        blokc_num_counts = {block: len(times) for block, times in self.results.items()}
+        all_count = sum(blokc_num_counts.values())
+        # 只取75%的数据
+        target_count = int(all_count * self.proportion_to_fit)
+        current_count = 0
+        filtered_results = {}
+        for block, count in blokc_num_counts.items():
+            if current_count + count <= target_count:
+                filtered_results[block] = self.results[block]
+                current_count += count
+            else:
+                break
+        
+        for block, migration_times in filtered_results.items():
+        # for block, migration_times in self.results.items():
+            print(f"Block: {block}, Len Times: {len(migration_times)}")
             avg_migration_time = mean(migration_times)
             self.avg_results[block] = avg_migration_time
     

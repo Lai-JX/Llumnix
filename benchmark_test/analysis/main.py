@@ -8,6 +8,134 @@ import pandas as pd
 import numpy as np
 from ast import literal_eval
 
+class GetDecodeRate:
+    def __init__(self, group):
+        self.group = group
+    def cal_avg_rate(self, res):
+        """
+        计算平均速率
+        :param res: 包含new_req和finished_req的字典
+        :return: 返回平均速率
+        """
+        if not res['new_req'] or not res['finished_req']:
+            return 0, 0
+        # 获取第一个和最后一个value非0的时间戳，并进行截取
+        new_req_values = list(res['new_req'].values())
+        finished_req_values = list(res['finished_req'].values())
+        if not new_req_values or not finished_req_values:
+            return 0, 0
+        first_new_req = next((k for k, v in res['new_req'].items() if v > 0), None)
+        last_new_req = next((k for k, v in reversed(res['new_req'].items()) if v > 0), None)
+        first_finished_req = next((k for k, v in res['finished_req'].items() if v > 0), None)
+        last_finished_req = next((k for k, v in reversed(res['finished_req'].items()) if v > 0), None)
+        if first_new_req is None or last_new_req is None or first_finished_req is None or last_finished_req is None:
+            return 0, 0
+        # print(f"First New Req: {first_new_req}, Last New Req: {last_new_req}")
+        # print(f"First Finished Req: {first_finished_req}, Last Finished Req: {last_finished_req}")
+        # 计算平均速率
+        new_req_rate = sum(new_req_values) / (last_new_req - first_new_req + 1) if (last_new_req - first_new_req + 1) > 0 else 0
+        finished_req_rate = sum(finished_req_values) / (last_finished_req - first_finished_req + 1) if (last_finished_req - first_finished_req + 1) > 0 else 0
+        return new_req_rate, finished_req_rate
+
+    def get_rate(self, instance_log, start_idx):
+        # 获取第一行的timestamp, 向下取整
+        tmp_timestamp = instance_log['timestamp'].iloc[start_idx]
+        tmp_timestamp = int(tmp_timestamp)
+        count = 1
+        res = {
+            'new_req':{},
+            'finished_req':{},
+        }
+        # 遍历每一行
+        for index, row in instance_log.iterrows():
+            # 将字符串转换为字典
+            try:
+                count_change = False
+                while row['timestamp'] > tmp_timestamp + count:
+                    # if not count_change:
+                    #     if res['new_req'][count] > 0 or res['finished_req'][count] > 0:
+                    #         # 输出当前秒的new_req之和
+                    #         print(f"Timestamp: {tmp_timestamp + count - 1}, New Req Sum: {res['new_req'][count]}")
+                    #         print(f"Timestamp: {tmp_timestamp + count - 1}, Finished Req Sum: {res['finished_req'][count]}")
+                    count += 1
+                    count_change = True
+                else:
+                    if count not in res['new_req']:
+                        res['new_req'][count] = 0
+                    res['new_req'][count] += row['new_req'] if not pd.isna(row['new_req']) else 0
+                    if count not in res['finished_req']:
+                        res['finished_req'][count] = 0
+                    res['finished_req'][count] += row['finished_req'] if not pd.isna(row['finished_req']) else 0
+                    
+                    # tmp_timestamp = row['timestamp']
+            except (ValueError, SyntaxError):
+                print(f"Error parsing dispatch_load_metric at index {index}: {row['dispatch_load_metric']}")
+                continue
+        # 计算均值
+        print(f"Count:{count}, Mean New Req: {np.mean(list(res['new_req'].values()))}, Sum: {sum(res['new_req'].values())}")
+        print(f"Count:{count}, Mean Finished Req: {np.mean(list(res['finished_req'].values()))}, Sum: {sum(res['finished_req'].values())}")
+        rate = self.cal_avg_rate(res)
+        res = {
+            "decode_avg_new_req_rate": rate[0],
+            "decode_finished_req_rate": rate[1]
+        }
+        return res
+
+    def get_inference_type(self, group):
+        for i, inference_type in enumerate(group['inference_type']):
+            if not pd.isna(inference_type) and inference_type != None:
+                return inference_type, i
+
+    # 获取instance.csv中每条记录的new_req_num和finished_req_num
+    def get_new_req_and_finished_req(self, group):
+        seq_lens_prev = []
+        bs_prev = 0
+        
+        # 新建列
+        group['new_req'] = 0
+        group['finished_req'] = 0
+        group['new_bs'] = 0
+        for index, row in group.iterrows():
+            if row['inference_type'] == 'prefill':
+                continue
+            seq_lens = literal_eval(row['seq_lens']) if pd.notnull(row['seq_lens']) else []
+            cur_p, pre_p, count = 0, 0, 0
+            while True:
+                if cur_p >= len(seq_lens) or pre_p >= len(seq_lens_prev):
+                    new_req_num = len(seq_lens) - count
+                    finished_req_num = len(seq_lens_prev) - count
+                    bs = bs_prev + new_req_num - finished_req_num
+
+                    if bs != row['bs']:
+                        print(f"New req num: {new_req_num}, Finished req num: {finished_req_num}, Batch size: {bs}, \nSeq lens prev: {seq_lens_prev}, \nSeq lens: {seq_lens}")
+
+                    group.at[index, 'new_req'] = new_req_num
+                    group.at[index, 'finished_req'] = finished_req_num
+                    group.at[index, 'new_bs'] = bs
+
+                    seq_lens_prev = seq_lens
+                    bs_prev = bs
+                    break
+                if 0 <= seq_lens[cur_p] - seq_lens_prev[pre_p] and seq_lens[cur_p] - seq_lens_prev[pre_p] < 14:
+                    cur_p += 1
+                    pre_p += 1
+                    count += 1
+                else:
+                    pre_p += 1
+        # return group
+
+
+    def get_profiling_data(self,):
+        group = self.group
+        inference_type, start_idx = self.get_inference_type(group)
+        if inference_type == 'decode':  
+            # 如果已经有new_req和finished_req列，则不需要重新计算
+            if 'new_req' not in group.columns or 'finished_req' not in group.columns:
+                self.get_new_req_and_finished_req(group)
+            return self.get_rate(group,start_idx)
+        return {}
+
+
 class InstanceMetricsAnalysis:
     def __init__(self, instance_file, enable_pd=True):
         self.instance_file = instance_file
@@ -15,6 +143,7 @@ class InstanceMetricsAnalysis:
 
         self.instance_log_group = None
         self.results = None
+
 
     def get_inference_type(self, group):
         for inference_type in group['inference_type']:
@@ -49,6 +178,7 @@ class InstanceMetricsAnalysis:
         return round(group['mofc'].mean(), 6)
     
     def get_step_time(self, group, inference_type):
+        res = {}
         group = group.copy()
         # 将profiling_data列(inference_type,num_seqs,running_seq_lens,last_inference_latency)中的内容转化为4列
         group[['profiling_inference_type', 'profiling_num_seqs', 'running_seq_lens', 'last_inference_latency']] = (
@@ -58,17 +188,28 @@ class InstanceMetricsAnalysis:
         )
         # 剔除last_inference_latency为NaN或0的行
         group = group[group['last_inference_latency'].notna() & (group['last_inference_latency'] > 0)]
+        # 计算实际到达速率和完成速率
+        if inference_type == 'decode':
+            decode_rate_calculator = GetDecodeRate(group)
+            decode_rate_res = decode_rate_calculator.get_profiling_data()
+            res = {**res, **decode_rate_res}
+
         mofc = self.get_mofc(group)
         # 过滤出指定inference_type的数据
         group = group[group['profiling_inference_type'] == inference_type]
-        # 根据last_inference_latency去重
-        group = group.drop_duplicates(subset=['last_inference_latency'])
+
+        group['avg_seq_len'] = group['running_seq_lens'] / group['profiling_num_seqs']
+        # # 根据last_inference_latency去重
+        # group = group.drop_duplicates(subset=['last_inference_latency'])
         return {
+            **res,
             "mofc":mofc, 
-            f"{inference_type}_step_time": round(mean(group['last_inference_latency']), 6) if not group.empty else 0.0
+            f"{inference_type}_step_time": round(mean(group['last_inference_latency']), 6) if not group.empty else 0.0,
+            "avg_seq_len": round(mean(group['avg_seq_len']), 6) if not group.empty else 0.0,
         }
 
     def get_instance_metrics(self):
+        self.results = {}
         if not os.path.isfile(self.instance_file):
             print(f"File {self.instance_file} does not exist.")
             return None
@@ -78,7 +219,7 @@ class InstanceMetricsAnalysis:
         instance_log = instance_log[instance_log['dispatch_load_metric'] != -np.inf]
 
         self.instance_log_group = instance_log.groupby("instance_id")
-        self.results = {}
+        
         for i, (instance_id, group) in enumerate(self.instance_log_group):
             if self.enable_pd:
                 inference_type = self.get_inference_type(group)
@@ -96,6 +237,7 @@ class InstanceMetricsAnalysis:
                     # f'{inference_type}_step_time': self.get_step_time(group, inference_type),
                 }
                 res = {**res, **self.get_step_time(group, inference_type)}
+                
             else:
                 decode_data = group[group['inference_type'] == 'decode']
                 res = {
@@ -131,7 +273,8 @@ class LogAnalysis:
         json_files = self.get_json_file_path(self.concurrencies[0], self.qps[0], 1, 4, ['1,1-2'])
         self.labels = json_files.keys()
 
-        self.cache_file = f'results/latency_results_cache-{self.path_tmp}-{model}-{self.concurrencies}-{self.qps}.json'
+        self.cache_file = f'/workspace/llm-serve/Llumnix/benchmark_test/analysis/results/latency_results_cache-{self.path_tmp}-{model}-{self.concurrencies}-{self.qps}.json'
+        print(f'[LogAnalysis] cache_file:{self.cache_file}')
         if os.path.exists(self.cache_file):
             print(f'[LogAnalysis] exist cache_file:{self.cache_file}')
             with open(self.cache_file, 'r', encoding='utf-8') as f:
@@ -419,6 +562,7 @@ class LogAnalysis:
                 info['avg_speed_blocks_per_s'] = avg_speed
         else:
             print("No migration information found.")
+            return {}
 
         # assert finished_flag
         res = {
@@ -590,7 +734,7 @@ class LogAnalysis_new(LogAnalysis):
                                              self.instance_deploy_msg, self.request_len)
         self.labels = json_files.keys()
 
-        self.cache_file = f'results/results_cache-{self.path_tmp}-{model}-{self.request_len}-{self.qps}-{self.concurrencies}.json'
+        self.cache_file = f'/workspace/llm-serve/Llumnix/benchmark_test/analysis/results/results_cache-{self.path_tmp}-{model}-{self.request_len}-{self.qps}-{self.concurrencies}.json'
         print(f'[LogAnalysis] cache_file:{self.cache_file}')
         if os.path.exists(self.cache_file):
             print(f'[LogAnalysis] exist cache_file:{self.cache_file}')
@@ -1047,6 +1191,321 @@ class LogAnalysis_new(LogAnalysis):
                     df_qps.loc['metric'] = [metric] * len(df_qps.columns)
                     df_qps.to_excel(writer, sheet_name=sheet_name)
 
+class ResultAnalysis():
+    def __init__(self, log_dir):
+        '''
+        参数说明：
+        log_dir: 日志文件夹路径，如 '/workspace/llm-serve/Llumnix/benchmark_test/logs/A6000-2-concurrency-1-128-256/llama-7b/poisson'
+        '''
+        self.log_dir = log_dir
+
+        self.cache_file = f'{self.log_dir}/real_results_cache.json'
+        print(f'[ResultAnalysis] cache_file:{self.cache_file}')
+        if os.path.exists(self.cache_file):
+            print(f'[ResultAnalysis] exist cache_file:{self.cache_file}')
+            with open(self.cache_file, 'r', encoding='utf-8') as f:
+                self.results = json.load(f)
+        else:
+            self.results = {}
+        
+    def save_to_cache_file(self):
+        with open(self.cache_file, 'w', encoding='utf-8') as f:
+            json.dump(self.results, f, ensure_ascii=False, indent=2)
+
+
+    def get_lantency(self, json_file):
+        '''
+            return request_time, prefill_time, decode_time
+        '''
+        if not os.path.isfile(json_file):
+            print(f"File {json_file} does not exist.")
+            return None
+        print(f'[get_lantency] Processing file: {json_file}')
+        try:
+            with open(json_file, 'r') as f:
+                data = json.load(f)
+        except Exception as e:
+            print(f'error:{str(e)}')
+        assert len(data) == 1, "Expected data to contain only one entry"
+        latencies = data[0]
+        req_latencies, prefill_latencies, decode_latencies = latencies['request_latencies'], latencies['prefill_token_latencies'], latencies['decode_token_latencies']
+        
+        # per_token_latency_breakdown_list = data[0]['per_token_latency_breakdown_list']
+        # prefill_waiting_time = [(per_token_latency_breakdown_list[i][0]['engine_step_timestamp_begin'] - per_token_latency_breakdown_list[i][0]['engine_add_request_timestamp'])*1000
+        #                         for i in range(len(per_token_latency_breakdown_list))]
+        # engine_step_latency_prefill = [per_token_latency_breakdown_list[i][0]['engine_step_latency'] for i in range(len(per_token_latency_breakdown_list))]
+        # engine_step_latency_decode = [
+        #     mean([token['engine_step_latency'] for token in per_token_latency_breakdown_list[i][1:]])
+        #     if len(per_token_latency_breakdown_list[i][1:]) > 0 else None
+        #     for i in range(len(per_token_latency_breakdown_list))
+        # ]
+
+        return {
+            'request_time':round(mean(req_latencies), 4), 
+            'prefill_time': round(mean(prefill_latencies), 4),
+            'decode_time': round(mean(decode_latencies), 4),
+            # 'prefill_waiting_time': round(mean(prefill_waiting_time), 4), 
+            # 'prefill_step_time': round(mean(engine_step_latency_prefill), 4), 
+            # 'decode_step_time': round(mean([x for x in engine_step_latency_decode if x is not None]), 4),
+        }
+    
+    def update_some_msg(self, qps, label, json_file, instance_file, log_file, is_pd):
+        if is_pd and 'migration_backend' not in self.results[str(qps)][label]:
+            # 从log_file中提取迁移信息（获取第二行中的migration_backend='nccl'）
+            # 读取文件的前几行以查找包含 "migration_backend" 的行
+            with open(log_file, 'r', encoding='utf-8') as file:
+                for line in file:
+                    if 'migration_backend' in line:
+                        match = re.search(r"migration_backend='(.*?)'", line)
+                        if match:
+                            migration_backend = match.group(1)
+                            print(f"Found migration_backend: {migration_backend}")
+                            if str(qps) not in self.results:
+                                self.results[str(qps)] = {}
+                            if label not in self.results[str(qps)]:
+                                self.results[str(qps)][label] = {}
+                            self.results[str(qps)][label]['migration_backend'] = migration_backend
+                            self.save_to_cache_file()
+                            break
+
+    def extract_migration_info(self, path, verbose=False):
+        '''
+        tp_hetero:不用
+        res = {
+            'avg_speed': avg_speed,
+            'avg_migration_time': avg_migration_time,
+            'avg_migrate_waiting_time': avg_migrate_waiting_time,
+            'avg_migration_count': avg_migration_count,
+            'avg_migration_aborted_dst_count': avg_migration_aborted_dst_count,
+            'sum_migration_aborted_dst_count': avg_migration_aborted_dst_count*len(migration_info),
+            'reject_migrate_out_count': reject_migrate_out_count,
+            'reject_migrate_in_count': reject_migrate_in_count,
+        }
+        '''
+        print(f"[extract_migration_info] Processing log file: {path}")
+
+        # 检查文件是否存在
+        if not os.path.isfile(path):
+            print(f"File {path} does not exist.")
+            return {}
+
+        migration_info = {}
+        reject_migrate_in_count = 0
+        reject_migrate_out_count = 0
+        # 示例： Instance ... migrate done, migrate request ['494c45676def4572986621d1afbc337f'], migration status: MigrationStatus.FINISHED, len: 7 blocks, cost: 240.65113067626953 ms
+        # 正确的正则表达式应为：
+        pattern = r"migrate request \[(.*?)\].*?len: (\d+) blocks,.*?cost: ([\d\.]+) ms"
+        count = 0
+
+        # 逐行读取文件（自动处理大文件）
+        with open(path, 'r', encoding='utf-8') as file:
+            for line in file:
+                line = line.strip()
+
+                if 'reject new migrate out' in line:
+                    reject_migrate_out_count += 1
+                if 'reject new migrate in' in line:
+                    reject_migrate_in_count += 1
+                # 获取迁移时间和速度
+                if 'migrate done' in line and 'cost:' in line:
+                    if count < 10:
+                        count += 1
+                        continue
+                    match = re.search(pattern, line)
+                    if match:
+                        ids_str = match.group(1)
+                        blocks = int(match.group(2))
+                        time = float(match.group(3))
+                        speed = blocks / time * 1000 if time > 0 else 0  # blocks/ms -> blocks/s
+                        request_ids = [req_id.strip("'") for req_id in ids_str.split(', ')]
+                        for req_id in request_ids:
+                            if len(req_id) > 0:
+                                # assert req_id in migration_info, f"{req_id},{type(req_id)},{line}"
+                                if req_id not in migration_info:
+                                    migration_info[req_id] = {}
+                                migration_info[req_id]["blocks"] = blocks
+                                migration_info[req_id]["time_ms"] = time
+                                migration_info[req_id]["speed_blocks_per_s"] = speed
+
+                if "engine_step_timestamp_end" in line or "_migrate_out_one_request start" in line \
+                    or "MigrationStatus.ABORTED_DST, timestamps" in line \
+                        or "MigrationStatus.ABORTED_SRC, timestamps" in line :
+                    # 使用正则表达式提取请求 ID
+                    request_id_match = re.search(r'[0-9a-f]{32}', line)
+                    # 使用正则表达式提取时间戳
+                    timestamp_match = re.search(r'timestamps: \d+\.\d+', line)
+
+                    if request_id_match and timestamp_match:
+                        request_id = request_id_match.group()
+                        timestamp = float(timestamp_match.group().split(":")[1])
+
+                        # 如果请求 ID 不在字典中，则初始化一个条目
+                        if request_id not in migration_info:
+                            migration_info[request_id] = {
+                                "blocks": 0,
+                                "time_ms":  0.0,
+                                "speed_blocks_per_s": 0.0,
+                                "engine_step_timestamp_end": None,
+                                "migrate_out_one_request_start": None,
+                                "migrate_start_count": 0,
+                                "ABORTED_DST_count":0,
+                                "ABORTED_SRC_count":0,
+                            }
+
+                        # 根据日志行内容更新对应的时间戳
+                        if "engine_step_timestamp_end" in line:
+                            migration_info[request_id]["engine_step_timestamp_end"] = timestamp
+                        if migration_info[request_id]["time_ms"] == 0.0:
+                            if "_migrate_out_one_request start" in line:
+                                migration_info[request_id]["migrate_out_one_request_start"] = timestamp
+                                migration_info[request_id]["migrate_start_count"] += 1
+                            elif "MigrationStatus.ABORTED_DST, timestamps" in line:
+                                migration_info[request_id]["ABORTED_DST_count"] += 1
+                            elif "MigrationStatus.ABORTED_SRC, timestamps" in line:
+                                migration_info[request_id]["ABORTED_SRC_count"] += 1
+                                
+                            if migration_info[request_id]["migrate_out_one_request_start"] is not None and migration_info[request_id]["engine_step_timestamp_end"] is not None:
+                                migration_info[request_id]["migrate_waiting_time"] = (migration_info[request_id]["migrate_out_one_request_start"] - migration_info[request_id]["engine_step_timestamp_end"]) *1000
+                                migration_info[request_id]["migrate_waiting_time"] = max(0, migration_info[request_id]["migrate_waiting_time"])
+                                # migrate_waiting_times.append(migration_info[request_id]["migrate_waiting_time"])
+                        else:
+                            # print("not first migration")
+                            pass
+
+        fail_req_id = set()
+        for req_id, info in migration_info.items():
+            if 'migrate_waiting_time' not in migration_info[req_id]:
+                fail_req_id.add(req_id)
+                if verbose:
+                    print(f'fail req_id:{req_id}, no migrate_waiting_time, {migration_info[req_id]}')
+            else:
+                if migration_info[req_id]["migrate_waiting_time"] > 1000:
+                    pass
+                    # file_output.write(f'req_id:{req_id},migrate_waiting_time:{migration_info[req_id]["migrate_waiting_time"]},ABORTED_DST_count:{migration_info[req_id]["ABORTED_DST_count"]}')
+            if migration_info[req_id]['time_ms'] == 0.0:
+                fail_req_id.add(req_id)
+                if verbose:
+                    print(f'fail req_id:{req_id}, no migrate_time, {migration_info[req_id]}')
+        for req_id in fail_req_id:
+            del migration_info[req_id]
+        
+        if migration_info:
+            avg_speed = mean(info['speed_blocks_per_s'] for info in migration_info.values())
+            avg_migration_time = mean(info['time_ms'] for info in migration_info.values())
+            avg_migrate_waiting_time = mean(info["migrate_waiting_time"] for info in migration_info.values())
+            avg_migration_count = mean(info['migrate_start_count'] for info in migration_info.values())
+            avg_migration_aborted_dst_count = mean(info['ABORTED_DST_count'] for info in migration_info.values())
+            if verbose:
+                print(f"fail req num(lose msg): {len(fail_req_id)}, finished_flag:{finished_flag},finished_str:{finished_str}")
+                print(f"Average migration speed: {avg_speed:.2f} blocks/s")
+                print(f"Average migration time: {avg_migration_time:.2f} ms")
+                print(f'Average migration waiting time: {avg_migrate_waiting_time:.2f} ms')
+                print(f"Average migration count: {avg_migration_count}")
+                print(f"Average migration ABORTED_DST count: {avg_migration_aborted_dst_count}")
+                print(f"Sum migration ABORTED_DST count: {avg_migration_aborted_dst_count*len(migration_info)}")
+                print(f"reject_migrate_out_count:{reject_migrate_out_count}")
+                print(f"reject_migrate_in_count:{reject_migrate_in_count}")
+                print(f"max block num : {max(info['blocks'] for info in migration_info.values())}")
+            # if avg_migration_count > avg_migration_aborted_dst_count + 
+            for req_id, info in migration_info.items():
+                info['avg_speed_blocks_per_s'] = avg_speed
+        else:
+            print("No migration information found.")
+            return {}
+
+        # assert finished_flag
+        res = {
+            'avg_speed': round(avg_speed,4),
+            'avg_migration_time': round(avg_migration_time,4),
+            'avg_migrate_waiting_time': round(avg_migrate_waiting_time,4),
+            'avg_migration_count': round(avg_migration_count,4),
+            'avg_migration_aborted_dst_count': round(avg_migration_aborted_dst_count,4),
+            'sum_migration_aborted_dst_count': round(avg_migration_aborted_dst_count*len(migration_info),4),
+            'reject_migrate_out_count': round(reject_migrate_out_count,4),
+            'reject_migrate_in_count': round(reject_migrate_in_count,4),
+        }
+        return res
+    
+    def get_all_msg(self):
+        for file in os.listdir(self.log_dir):
+            if not file.endswith('.json') or 'results' in file:
+                continue
+            # print(f'[get_all_msg] file:{file}')
+            json_file = os.path.join(self.log_dir, file)
+            log_file = json_file.replace('_latency-info.json', '.log')
+            instance_file = json_file.replace('_latency-info.json', '_instance.csv')
+            tmp = file.split('_')
+            if 'pdd' in file:
+                # benchmark_pdd_2000_qps-2_1-1,1,1_latency-info.json
+                label = tmp[4]
+                if len(tmp[3].split('-')) != 2:
+                    print(f'[get_all_msg] error file name:{file}\n')
+                    continue
+                qps = tmp[3].split('-')[1]
+                is_pd = True
+            else:
+                # benchmark_2000_qps-12_1,1,1,1_latency-info.json
+                label = tmp[3]
+                qps = tmp[2].split('-')[1]
+                is_pd = False
+            # 判断是否已经处理过
+            if str(qps) in self.results and label in self.results[str(qps)]:
+                # print(f'[get_all_msg] skip, already processed qps:{qps}, label:{label}')
+                self.update_some_msg(qps, label, json_file, instance_file, log_file, is_pd)
+                continue
+
+            latency = self.get_lantency(json_file)
+            instance_ana = InstanceMetricsAnalysis(instance_file, is_pd)
+            instance_ana.get_instance_metrics()
+            if is_pd:
+                migration_info = self.extract_migration_info(log_file,)
+                res = {**latency, **migration_info, **instance_ana.results}
+            else:
+                res = {**latency, **instance_ana.results}
+            print()
+            if str(qps) not in self.results:
+                self.results[str(qps)] = {}
+            self.results[qps][label] = res
+            self.save_to_cache_file()
+    def get_all_msg_updata_instance_metric(self):
+        for file in os.listdir(self.log_dir):
+            if not file.endswith('.json') or 'results' in file:
+                continue
+            # print(f'[get_all_msg] file:{file}')
+            json_file = os.path.join(self.log_dir, file)
+            instance_file = json_file.replace('_latency-info.json', '_instance.csv')
+            tmp = file.split('_')
+            if 'pdd' in file:
+                # benchmark_pdd_2000_qps-2_1-1,1,1_latency-info.json
+                label = tmp[4]
+                if len(tmp[3].split('-')) != 2:
+                    print(f'[get_all_msg] error file name:{file}\n')
+                    continue
+                qps = tmp[3].split('-')[1]
+                is_pd = True
+            else:
+                # benchmark_2000_qps-12_1,1,1,1_latency-info.json
+                label = tmp[3]
+                qps = tmp[2].split('-')[1]
+                is_pd = False
+            # 判断是否已经处理过
+            if not(str(qps) in self.results and label in self.results[str(qps)]):
+                # print(f'[get_all_msg] skip, already processed qps:{qps}, label:{label}')
+                continue
+            print(f'[updata_instance_metric]:{instance_file}')
+            instance_ana = InstanceMetricsAnalysis(instance_file, is_pd)
+            instance_ana.get_instance_metrics()
+            self.results[str(qps)][label].update(instance_ana.results)
+            self.save_to_cache_file()
+ 
+    def get_msg_according_qps_and_label(self, qps, label):
+        if str(qps) in self.results and label in self.results[str(qps)]:
+            return self.results[str(qps)][label]
+        else:
+            print(f'[get_msg_according_qps_and_label] no found qps:{qps}, label:{label}')
+            return None
+
+
 if __name__ == '__main__':
     # instance_metric = InstanceMetricsAnalysis('/workspace/llm-serve/Llumnix/benchmark_test/logs/A6000-2-formal2-concurrency-4-pdd-4/llama-13b/poisson/serve_pdd_tp1_2000_qps_1_1_3_instance.csv')
     # instance_metric.get_instance_metrics()
@@ -1093,14 +1552,20 @@ if __name__ == '__main__':
             
 
     # 3卡
-    instance_deploy_msg = [     # (prefill_tps, decode_tps)
-        ([1,1,1],[]),([1],[2]),
-    ]
-    analysis = LogAnalysis_new('llama-13b', [1,2], [1,2,4], instance_deploy_msg, request_len=None, )
+    # instance_deploy_msg = [     # (prefill_tps, decode_tps)
+    #     ([1,1,1],[]),([1],[2]),
+    # ]
+    # analysis = LogAnalysis_new('llama-13b', [1,2], [1,2,4], instance_deploy_msg, request_len=None, )
+    # analysis.get_all_msg()
+    # metrics = [
+    #         ["request_time", "prefill_time", "decode_time", "prefill-mofc",'prefill-gpu_cache_usage'],
+    #         'prefill_bs',
+    #         'prefill_all_time_bs',
+    # ]
+    # analysis.translate_to_excel_according_metrics(metrics)
+
+    analysis = ResultAnalysis('/workspace/llm-serve/Llumnix/benchmark_test/logs/A6000-2-concurrency-1/llama-7b/poisson')
     analysis.get_all_msg()
-    metrics = [
-            ["request_time", "prefill_time", "decode_time", "prefill-mofc",'prefill-gpu_cache_usage'],
-            'prefill_bs',
-            'prefill_all_time_bs',
-    ]
-    analysis.translate_to_excel_according_metrics(metrics)
+
+    analysis = ResultAnalysis('/workspace/llm-serve/Llumnix/benchmark_test/logs/A6000-2-concurrency-1/llama-13b/poisson')
+    analysis.get_all_msg()

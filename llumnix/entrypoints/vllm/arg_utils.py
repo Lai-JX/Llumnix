@@ -125,6 +125,9 @@ def get_args(llumnix_config: LlumnixConfig, launch_mode: LaunchMode, parser: Llu
     check_engine_args(engine_args)
     check_instance_args(instance_args, engine_args)
 
+    # add by ljx
+    engine_args.max_num_seqs = min(2048, engine_args.tensor_parallel_size * 512)
+
     logger.info("entrypoints_args: {}".format(entrypoints_args))
     logger.info("manager_args: {}".format(manager_args))
     logger.info("instance_args: {}".format(instance_args))

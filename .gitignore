@@ -197,3 +197,5 @@ benchmark_test/analysis/results
 benchmark_test/analysis/tmp
 benchmark_test/analysis/*.txt
 benchmark_test/analysis/*.png
+benchmark_test/analysis/profile/*.png
+benchmark_test/analysis/profile/*.csv
