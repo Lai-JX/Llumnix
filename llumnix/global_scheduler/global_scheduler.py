@@ -152,7 +152,8 @@ class GlobalScheduler:
         # request_expected_steps is only used in llumnix based prefill-decode disagg
         request_expected_steps = math.inf
         if self.global_scheduler_config.enable_pd_disagg and \
-            self.instance_info[prefill_instance_id].instance_type != InstanceType.DECODE:
+            self.instance_info[prefill_instance_id].instance_type == InstanceType.PREFILL:
+            # self.instance_info[prefill_instance_id].instance_type != InstanceType.DECODE:
             request_expected_steps = 1
 
         self._log_request_dispatch_info(

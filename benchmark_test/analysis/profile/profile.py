@@ -621,6 +621,7 @@ class InstanceDecodeProfilerV2(InstanceDecodeProfiler):
         # 对结果按照batch_size和seq_len进行排序
         sorted_items = sorted(self.results.items(), key=lambda x: (x[0][0], x[0][1]))
         self.results = {k: v for k, v in sorted_items}
+
 class MigrationProfile:
     def __init__(self, log_files, proportion_to_fit=1.0, is_verbose=False):
         if not isinstance(log_files, list):
@@ -691,7 +692,7 @@ class MigrationProfile:
         
         for block, migration_times in filtered_results.items():
         # for block, migration_times in self.results.items():
-            print(f"Block: {block}, Len Times: {len(migration_times)}")
+            # print(f"Block: {block}, Len Times: {len(migration_times)}")
             avg_migration_time = mean(migration_times)
             self.avg_results[block] = avg_migration_time
     
@@ -761,6 +762,201 @@ class MigrationProfile:
             data = [data]
         return np.polynal(self.fit_results, data)
 
+# 考虑具体实例间的迁移
+class MigrationProfileV2:
+    def __init__(self, log_files, proportion_to_fit=1.0, is_verbose=False):
+        if not isinstance(log_files, list):
+            log_files = [log_files]
+        self.log_files = log_files
+        self.results = {} # {tp-tp:{blocks:time_ms}}
+        self.avg_results = {} # {tp-tp:{blocks:time_ms}}
+        self.fit_results = None
+        self.is_verbose = is_verbose
+        self.proportion_to_fit = proportion_to_fit
+    
+    def get_instance_gpu_id(self, line):
+        # 实例：MigrationWorker(actor_name=instance_37378191b28d47329fc29d9f0f37077f, actor_id=42a196619e89f23d17cb4bee01000000, placement_group_id=9e33b2c56f1c746e31ed5ac06ee701000000, namespace=llumnix, job_id=01000000, worker_id=1b22d5f92000faf26b59851f6b460853d171dd9249cbdc2badd9614b, node_id=ebbfdb2beaca0c39b0e17b6be5be78c73c7022f5aa1dfb8536532f79, gpu_ids=['2'])
+        # 提取出instance id 和 gpu_ids
+        pattern = r"instance_([a-f0-9]+).*?gpu_ids=\[(.*?)\]"
+        match = re.search(pattern, line)
+        if match:
+            instance_id = match.group(1)
+            gpu_ids_str = match.group(2)
+            gpu_ids = [gpu_id.strip("'") for gpu_id in gpu_ids_str.split(', ')]
+            gpu_ids_sorted = sorted(gpu_ids, key=lambda x: int(x))  # 按照数字大小排序
+            return instance_id, set(gpu_ids_sorted)
+        pattern = r"worker_([a-f0-9]+).*?gpu_ids=\[(.*?)\]"
+        match = re.search(pattern, line)
+        if match:
+            instance_id = match.group(1)
+            gpu_ids_str = match.group(2)
+            gpu_ids = [gpu_id.strip("'") for gpu_id in gpu_ids_str.split(', ')]
+            gpu_ids_sorted = sorted(gpu_ids, key=lambda x: int(x))  # 按照数字大小排序
+            return instance_id, set(gpu_ids_sorted)
+        return None
+
+    def extract_migration_info(self, log_file):
+        instance_tp = {}
+
+        if self.is_verbose:
+            print(f"[extract_migration_info] Processing log file: {log_file}")
+
+        # 检查文件是否存在
+        if not os.path.isfile(log_file):
+            print(f"File {log_file} does not exist.")
+            return {}
+        # 示例： Instance 3d0da7ccef9941b29ca9b307e42b2841->db3351e3dd6642a4bb0e28f8b8a1c575 migrate done, migrate request ['912f7b03c04948219105dc8794e46cae'], migration status: MigrationStatus.FINISHED, len: 2 blocks, cost: 126.34778022766113 ms
+        # 提取出instance id、migrate request id、blocks和cost
+        pattern = r"Instance ([a-f0-9]+)->([a-f0-9]+).*?migrate request \[(.*?)\].*?len: (\d+) blocks,.*?cost: ([\d\.]+) ms"
+        count = 0
+
+        # 逐行读取文件（自动处理大文件）
+        with open(log_file, 'r', encoding='utf-8') as file:
+            for line in file:
+                line = line.strip()
+                res_gpu = self.get_instance_gpu_id(line)
+                if res_gpu is not None:
+                    instance_id, gpu_ids = res_gpu
+                    if instance_id not in instance_tp:
+                        instance_tp[instance_id] = gpu_ids
+                    else:
+                        instance_tp[instance_id] = instance_tp[instance_id].union(gpu_ids)
+                    
+                # 获取迁移时间和速度
+                if 'migrate done' in line and 'cost:' in line and 'MigrationStatus.FINISHED' in line:
+                    if count < 10:
+                        count += 1
+                        continue
+                    match = re.search(pattern, line)
+                    if match:
+                        src_instance = match.group(1)
+                        dst_instance = match.group(2)
+                        src_tp = len(instance_tp.get(src_instance, set()))
+                        dst_tp = len(instance_tp.get(dst_instance, set()))
+                        ids_str = match.group(3)
+                        blocks = int(match.group(4))
+                        time = float(match.group(5))
+                        speed = blocks / time * 1000 if time > 0 else 0  # blocks/ms -> blocks/s
+                        request_ids = [req_id.strip("'") for req_id in ids_str.split(', ')]
+                        for req_id in request_ids:
+                            if len(req_id) > 0:
+                                # tp = f'{src_tp}-{dst_tp}'
+                                tp = f'{src_instance}_tp{src_tp}-{dst_instance}_tp{dst_tp}'
+                                if tp not in self.results:
+                                    self.results[tp] = {}
+                                if blocks not in self.results[tp]:
+                                    self.results[tp][blocks] = []
+                                self.results[tp][blocks].append(time)
+    def get_migration_info(self):
+        for log_file in self.log_files:
+            self.extract_migration_info(log_file)
+        for tp, res in self.results.items():
+            self.results[tp] = dict(sorted(res.items(), key=lambda x: x[0]))
+        self.calculate_avg_migrate_time()
+        self.fit_block_num_vs_avg_migration_time()
+
+    def calculate_avg_migrate_time(self):
+        for tp, res in self.results.items():
+            # 获取每个block数下的数据量
+            blokc_num_counts = {block: len(times) for block, times in self.results[tp].items()}
+            all_count = sum(blokc_num_counts.values())
+            # 只取75%的数据
+            target_count = int(all_count * self.proportion_to_fit)
+            current_count = 0
+            filtered_results = {}
+            for block, count in blokc_num_counts.items():
+                if current_count + count <= target_count:
+                    filtered_results[block] = self.results[tp][block]
+                    current_count += count
+                else:
+                    break
+            
+            for block, migration_times in filtered_results.items():
+            # for block, migration_times in self.results.items():
+                # print(f"Block: {block}, Len Times: {len(migration_times)}")
+                avg_migration_time = mean(migration_times)
+                if tp not in self.avg_results:
+                    self.avg_results[tp] = {}
+                self.avg_results[tp][block] = avg_migration_time
+    
+    # 拟合block_num和avg_migration_time的关系
+    def fit_block_num_vs_avg_migration_time(self):
+        if self.fit_results is None:
+            self.fit_results = {}
+        for tp, res in self.avg_results.items():
+            block_num = list(self.avg_results[tp].keys())
+            avg_migration_time = list(self.avg_results[tp].values())
+            block_num = np.array(block_num, dtype=float)
+            avg_migration_time = np.array(avg_migration_time, dtype=float)
+
+            if len(block_num) < 2:
+                print(f"Not enough data to fit.")
+                return None
+            # 使用numpy的polyfit进行线性拟合
+            coefficients = np.polyfit(block_num, avg_migration_time, 1)
+            self.fit_results[tp] = coefficients
+            if self.is_verbose:
+                print(f"fit_results:{self.fit_results}")
+    
+        # 绘制token_num和avg_step_time的关系图,使用matplotlib,
+    def plot_block_num_vs_avg_migration_time(self):
+        import matplotlib.pyplot as plt
+
+        tp_list = list(self.avg_results.keys())
+        n_tp = len(tp_list)
+        if n_tp == 0:
+            print("No data to plot.")
+            return
+        fig, axs = plt.subplots(1, n_tp, figsize=(6 * n_tp, 6), squeeze=False)
+        for idx, tp in enumerate(tp_list):
+            ax = axs[0, idx]
+            block_num = list(self.avg_results[tp].keys())
+            avg_migration_time = list(self.avg_results[tp].values())
+            block_num = np.array(block_num, dtype=float)
+            avg_migration_time = np.array(avg_migration_time, dtype=float)
+            # 剔除异常值
+            if len(block_num) > 2:
+                q1 = np.percentile(avg_migration_time, 25)
+                q3 = np.percentile(avg_migration_time, 75)
+                iqr = q3 - q1
+                lower_bound = q1 - 1.5 * iqr
+                upper_bound = q3 + 1.5 * iqr
+                print(f"Lower bound: {lower_bound}, Upper bound: {upper_bound}")
+                mask = (avg_migration_time >= lower_bound) & (avg_migration_time <= upper_bound)
+                block_num = block_num[mask]
+                avg_migration_time = avg_migration_time[mask]
+            ax.scatter(block_num, avg_migration_time, color='red', s=10, label='data')
+            # 拟合曲线
+            if self.fit_results is None or tp not in self.fit_results:
+                self.fit_block_num_vs_avg_migration_time()
+            if self.fit_results is not None and tp in self.fit_results:
+                fit_line = np.polyval(self.fit_results[tp], block_num)
+                ax.plot(block_num, fit_line, color='orange', label='fit')
+                # 在图片上显示拟合结果
+                fit_eq = f"y = {self.fit_results[tp][0]:.6f}x + {self.fit_results[tp][1]:.6f}"
+                ax.text(0.05, 0.95, fit_eq, transform=ax.transAxes, fontsize=12,
+                        verticalalignment='top', bbox=dict(facecolor='white', edgecolor='orange', alpha=0.5))
+                # 在图片上显示RMSE
+                y_pred = fit_line
+                rmse = np.sqrt(np.mean((avg_migration_time - y_pred) ** 2))
+                ax.text(0.05, 0.88, f'RMSE: {rmse:.4f}', transform=ax.transAxes, fontsize=12,
+                        verticalalignment='top', bbox=dict(facecolor='white', edgecolor='orange', alpha=0.5))
+                # 斜率的倒数
+                slope = self.fit_results[tp][0]
+                ax.text(0.05, 0.81, f'1/Slope: {1/slope:.4f}', transform=ax.transAxes, fontsize=12,
+                        verticalalignment='top', bbox=dict(facecolor='white', edgecolor='orange', alpha=0.5))
+            ax.set_title(f'{tp}\nBlock Num vs Avg Migration Time')
+            ax.set_xlabel('Block Num')
+            ax.set_ylabel('Avg Migration Time (ms)')
+            ax.grid(True)
+            ax.legend()
+        plt.tight_layout()
+        plt.show()
+        plt.savefig('migration_time_vs_block_num.png')
+    def fit_certain_data(self, data):
+        if not isinstance(data, list):
+            data = [data]
+        return np.polynal(self.fit_results, data)
 
 if __name__ == '__main__':
     # instance_file_dir = '/workspace/llm-serve/Llumnix/benchmark_test/logs/A6000-2-concurrency-1/llama-13b/poisson'
@@ -774,43 +970,53 @@ if __name__ == '__main__':
     # migration_profile.extract_migration_info()
     # print(migration_profile.avg_results)
 
-    instance_file_dir = '/workspace/llm-serve/Llumnix/benchmark_test/logs/A6000-2-formal2-concurrency-1-pdd-4/llama-13b/poisson'
-    instance_profile = InstanceDecodeProfiler(instance_file_dir, enable_pd=True)
-    instance_profile.get_pdd_instance_info()
-    # instance_profile.plot_result()
-    # print(instance_profile.results)
-    X = instance_profile.x_values
-    y = instance_profile.y_values
-    # 剔除异常值
-    if len(y) > 2:
-        q1 = np.percentile(y, 25)
-        q3 = np.percentile(y, 75)
-        iqr = q3 - q1
-        lower_bound = q1 - 1.5 * iqr
-        upper_bound = q3 + 1.5 * iqr
-        print(f"Lower bound: {lower_bound}, Upper bound: {upper_bound}")
-        mask = (y >= lower_bound) & (y <= upper_bound)
-        X = X[mask]
-        y = y[mask]
-        # 随机抽样1000个点进行可视化
-        if len(X) > 2000:
-            indices = np.random.choice(len(X), 2000, replace=False)
-            X = X[indices]
-            y = y[indices]
-    # 基于plotly绘制可交互三维图
-    import plotly.graph_objects as go
-    fig = go.Figure(data=[go.Scatter3d(
-        x=X[:, 0], y=X[:, 1], z=y,
-        mode='markers',
-        marker=dict(size=2, color='blue', opacity=0.1)
-    )])
-    # 设置图表标题和轴标签
-    fig.update_layout(
-        title='Batch Size and Max Seq Len vs Avg Step Time',
-        scene=dict(
-            xaxis_title='Batch Size',
-            yaxis_title='Max Seq Len',
-            zaxis_title='Avg Step Time (ms)'
-        )
-    )
-    fig.show()
+    # instance_file_dir = '/workspace/llm-serve/Llumnix/benchmark_test/logs/A6000-2-formal2-concurrency-1-pdd-4/llama-13b/poisson'
+    # instance_profile = InstanceDecodeProfiler(instance_file_dir, enable_pd=True)
+    # instance_profile.get_pdd_instance_info()
+    # # instance_profile.plot_result()
+    # # print(instance_profile.results)
+    # X = instance_profile.x_values
+    # y = instance_profile.y_values
+    # # 剔除异常值
+    # if len(y) > 2:
+    #     q1 = np.percentile(y, 25)
+    #     q3 = np.percentile(y, 75)
+    #     iqr = q3 - q1
+    #     lower_bound = q1 - 1.5 * iqr
+    #     upper_bound = q3 + 1.5 * iqr
+    #     print(f"Lower bound: {lower_bound}, Upper bound: {upper_bound}")
+    #     mask = (y >= lower_bound) & (y <= upper_bound)
+    #     X = X[mask]
+    #     y = y[mask]
+    #     # 随机抽样1000个点进行可视化
+    #     if len(X) > 2000:
+    #         indices = np.random.choice(len(X), 2000, replace=False)
+    #         X = X[indices]
+    #         y = y[indices]
+    # # 基于plotly绘制可交互三维图
+    # import plotly.graph_objects as go
+    # fig = go.Figure(data=[go.Scatter3d(
+    #     x=X[:, 0], y=X[:, 1], z=y,
+    #     mode='markers',
+    #     marker=dict(size=2, color='blue', opacity=0.1)
+    # )])
+    # # 设置图表标题和轴标签
+    # fig.update_layout(
+    #     title='Batch Size and Max Seq Len vs Avg Step Time',
+    #     scene=dict(
+    #         xaxis_title='Batch Size',
+    #         yaxis_title='Max Seq Len',
+    #         zaxis_title='Avg Step Time (ms)'
+    #     )
+    # )
+    # fig.show()
+
+
+    file = '/workspace/llm-serve/Llumnix/benchmark_test/logs/A6000-2-0928-concurrency-1/llama-13b/poisson/serve_pdd_2000_qps_2_2_4.log'
+    migration_profile = MigrationProfileV2(file)
+    migration_profile.get_migration_info()
+    print(migration_profile.fit_results)
+
+    migration_profile = MigrationProfile(file)
+    migration_profile.get_migration_info()
+    print(migration_profile.fit_results)

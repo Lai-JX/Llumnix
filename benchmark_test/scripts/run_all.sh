@@ -1,7 +1,7 @@
 #!/bin/bash
 ulimit -n 63225
 req_num=2000
-gputype=A6000-2-0916 # multi-port-zmp-parallel-parallel-buffer-main
+gputype=A6000-2-1003 # multi-port-zmp-parallel-parallel-buffer-main
 # gputype=A6000-2-test
 max_migration_concurrencys=(1) 
 prefix="$gputype"
@@ -133,18 +133,18 @@ response_len=32
 
 for max_migration_concurrency in "${max_migration_concurrencys[@]}"; do
     echo $max_migration_concurrency
-    ./run_base.sh "1" "1,1,1" $req_num llama-13b poisson 3 "$prefix-concurrency-$max_migration_concurrency" $max_migration_concurrency
-    ./run_base.sh "1,1" "1,1" $req_num llama-13b poisson 3 "$prefix-concurrency-$max_migration_concurrency" $max_migration_concurrency
-    ./run_base.sh "1,1,1" "1" $req_num llama-13b poisson 3 "$prefix-concurrency-$max_migration_concurrency" $max_migration_concurrency
-    ./run_base.sh "1" "1,1,1" $req_num llama-13b poisson 5 "$prefix-concurrency-$max_migration_concurrency" $max_migration_concurrency
-    ./run_base.sh "1,1" "1,1" $req_num llama-13b poisson 5 "$prefix-concurrency-$max_migration_concurrency" $max_migration_concurrency
-    ./run_base.sh "1,1,1" "1" $req_num llama-13b poisson 5 "$prefix-concurrency-$max_migration_concurrency" $max_migration_concurrency
-    ./run_base.sh "1" "1,1,1" $req_num llama-13b poisson 6 "$prefix-concurrency-$max_migration_concurrency" $max_migration_concurrency
-    ./run_base.sh "1,1" "1,1" $req_num llama-13b poisson 6 "$prefix-concurrency-$max_migration_concurrency" $max_migration_concurrency
-    ./run_base.sh "1,1,1" "1" $req_num llama-13b poisson 6 "$prefix-concurrency-$max_migration_concurrency" $max_migration_concurrency
-    ./run_base.sh "1" "1,1,1" $req_num llama-13b poisson 7 "$prefix-concurrency-$max_migration_concurrency" $max_migration_concurrency
-    ./run_base.sh "1,1" "1,1" $req_num llama-13b poisson 7 "$prefix-concurrency-$max_migration_concurrency" $max_migration_concurrency
-    ./run_base.sh "1,1,1" "1" $req_num llama-13b poisson 7 "$prefix-concurrency-$max_migration_concurrency" $max_migration_concurrency
+    # ./run_base.sh "1" "4" $req_num llama-7b poisson 4 "$prefix-concurrency-$max_migration_concurrency" $max_migration_concurrency
+    # ./run_base.sh "2" "1" $req_num llama-7b poisson 4 "$prefix-concurrency-$max_migration_concurrency" $max_migration_concurrency
+    # ./run_base.sh "2" "2" $req_num llama-7b poisson 4 "$prefix-concurrency-$max_migration_concurrency" $max_migration_concurrency
+    # ./run_base.sh "2" "4" $req_num llama-7b poisson 4 "$prefix-concurrency-$max_migration_concurrency" $max_migration_concurrency
+    # ./run_base.sh "4" "1" $req_num llama-7b poisson 4 "$prefix-concurrency-$max_migration_concurrency" $max_migration_concurrency
+    # ./run_base.sh "4" "2" $req_num llama-7b poisson 4 "$prefix-concurrency-$max_migration_concurrency" $max_migration_concurrency
+    # ./run_base.sh "4" "4" $req_num llama-7b poisson 4 "$prefix-concurrency-$max_migration_concurrency" $max_migration_concurrency
+    
+    ./run_base.sh "2,2" "" $req_num llama-13b poisson 2 "$prefix-concurrency-$max_migration_concurrency" $max_migration_concurrency
+    ./run_base.sh "4" "" $req_num llama-13b poisson 2 "$prefix-concurrency-$max_migration_concurrency" $max_migration_concurrency
+    ./run_base.sh "2,2" "" $req_num llama-13b poisson 1 "$prefix-concurrency-$max_migration_concurrency" $max_migration_concurrency
+    ./run_base.sh "4" "" $req_num llama-13b poisson 1 "$prefix-concurrency-$max_migration_concurrency" $max_migration_concurrency
     
 done
 

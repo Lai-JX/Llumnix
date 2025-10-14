@@ -135,7 +135,7 @@ _C.INSTANCE.REQUEST_OUTPUT_FORWARDING_MODE = "thread"
 
 # ------------------------- LOAD METRICS CONFIGURATION ------------------------
 # Instance dispatch load metric
-_C.INSTANCE.DISPATCH_LOAD_METRIC = 'remaining_steps'
+_C.INSTANCE.DISPATCH_LOAD_METRIC = 'kv_blocks_ratio'    # remaining_steps
 # Prefill instance dispatch load metric
 _C.INSTANCE.DISPATCH_PREFILL_LOAD_METRIC = 'kv_blocks_ratio'
 # Prefill instance dispatch load metric when used for decoding
